@@ -9,6 +9,7 @@ import {
   PauseCircle,
   PlayCircle,
   Plus,
+  ShieldAlert,
   RefreshCw,
   Trash2,
   XCircle,
@@ -17,6 +18,8 @@ import {
 import { api } from "@/lib/api-client";
 import type {
   AppState,
+  BanCheckAllResult,
+  BanCheckResult,
   CheckinAllResult,
   RefreshAllResult,
   ResourceDetail,
@@ -42,6 +45,20 @@ import { PaginationControls } from "@/components/shared/PaginationControls";
 import { Skeleton } from "@/components/ui/skeleton";
 
 const ACCOUNTS_PAGE_SIZE = 5;
+
+function formatBanCheck(r: BanCheckResult) {
+  const extra = r.detail ? `：${r.detail}` : "";
+  switch (r.status) {
+    case "ok":
+      return "账号正常，未被封禁";
+    case "banned":
+      return `已封禁/拉黑，已停用${extra}`;
+    case "session_dead":
+      return `登录失效，需重新登录${extra}`;
+    default:
+      return `探测失败${extra}`;
+  }
+}
 
 const CHANNEL_LABEL: Record<string, string> = {
   workbuddy: "WorkBuddy",
@@ -650,9 +667,9 @@ export default function AccountsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyAccount, setBusyAccount] = useState<string | null>(null);
-  const [batchBusy, setBatchBusy] = useState<"checkin" | "refresh" | null>(
-    null,
-  );
+  const [batchBusy, setBatchBusy] = useState<
+    "checkin" | "refresh" | "ban" | null
+  >(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [detailView, setDetailView] = useState<DetailView | null>(null);
@@ -697,7 +714,7 @@ export default function AccountsPage() {
     }
   };
 
-  const runBatch = async (kind: "checkin" | "refresh") => {
+  const runBatch = async (kind: "checkin" | "refresh" | "ban") => {
     setBatchBusy(kind);
     setActionError(null);
     setActionSuccess(null);
@@ -709,11 +726,20 @@ export default function AccountsPage() {
         setActionSuccess(
           `批量签到完成：${ok}/${total} 成功${ok < total ? `，${total - ok} 个失败` : ""}`,
         );
-      } else {
+      } else if (kind === "refresh") {
         const r: RefreshAllResult = await api.accountRefreshAll();
         setActionSuccess(
           `批量刷新完成：${r.ok}/${r.total} 成功${r.failed > 0 ? `，${r.failed} 个失败` : ""}`,
         );
+      } else {
+        const r: BanCheckAllResult = await api.accountBanCheckAll();
+        const bits = [
+          `检测完成：${r.ok}/${r.total} 正常`,
+        ];
+        if (r.banned) bits.push(`${r.banned} 个封禁/拉黑（已停用）`);
+        if (r.session_dead) bits.push(`${r.session_dead} 个登录失效`);
+        if (r.failed) bits.push(`${r.failed} 个探测失败`);
+        setActionSuccess(bits.join("，"));
       }
       await load();
     } catch (err: unknown) {
@@ -789,6 +815,20 @@ export default function AccountsPage() {
                   <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
                 )}
                 批量刷新
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={batchBusy !== null || total === 0}
+                onClick={() => void runBatch("ban")}
+                className="h-10 w-full sm:h-7 sm:w-auto"
+              >
+                {batchBusy === "ban" ? (
+                  <LoadingSpinner size={14} className="mr-1.5" />
+                ) : (
+                  <ShieldAlert className="mr-1.5 h-3.5 w-3.5" />
+                )}
+                检测封禁
               </Button>
               <AddAccountDialog onDone={load} />
               <ImportDialog onDone={load} />
@@ -938,6 +978,25 @@ export default function AccountsPage() {
                           >
                             <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
                             刷新积分
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              void runAction(
+                                account.uid,
+                                async () => {
+                                  const r = await api.accountBanCheck(account.uid);
+                                  return { msg: formatBanCheck(r) };
+                                },
+                                "检测完成",
+                              )
+                            }
+                            disabled={busyAccount === account.uid}
+                            className="h-10 w-full whitespace-nowrap sm:h-7 sm:w-auto"
+                          >
+                            <ShieldAlert className="mr-1.5 h-3.5 w-3.5" />
+                            检测封禁
                           </Button>
                           <Button
                             variant="outline"

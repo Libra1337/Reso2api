@@ -186,6 +186,12 @@ export const api = {
       disabled,
     }),
 
+  accountBanCheck: (uid: string) =>
+    request<import("@/types").BanCheckResult>("/account/ban_check", { uid }),
+
+  accountBanCheckAll: () =>
+    request<import("@/types").BanCheckAllResult>("/account/ban_check_all", {}),
+
   accountResourceDetail: (uid: string) =>
     request<import("@/types").ResourceDetail>("/account/resource_detail", {
       uid,

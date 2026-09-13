@@ -1799,6 +1799,42 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		log.Printf("imported account uid=%s nickname=%s file=%s", au.UID, au.Nickname, filepath.Base(fp))
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": au.UID, "nickname": au.Nickname})
 	})
+	inner.HandleFunc("POST /api/account/ban_check", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UID string `json:"uid"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		v, err := a.CheckAccountBan(req.UID)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, v)
+	})
+	inner.HandleFunc("POST /api/account/ban_check_all", func(w http.ResponseWriter, r *http.Request) {
+		results := a.CheckAccountBanAll()
+		banned, dead, fail, ok := 0, 0, 0, 0
+		for _, v := range results {
+			switch v.Status {
+			case "banned":
+				banned++
+			case "session_dead":
+				dead++
+			case "error":
+				fail++
+			default:
+				ok++
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"results":      results,
+			"total":        len(results),
+			"ok":           ok,
+			"banned":       banned,
+			"session_dead": dead,
+			"failed":       fail,
+		})
+	})
 	inner.HandleFunc("POST /api/account/disable", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UID      string `json:"uid"`

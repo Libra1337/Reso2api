@@ -128,6 +128,24 @@ export interface RefreshAllResult {
   failed: number;
 }
 
+export interface BanCheckResult {
+  uid: string;
+  nickname?: string;
+  group?: string;
+  status: "ok" | "banned" | "session_dead" | "error" | string;
+  detail?: string;
+  disabled?: boolean;
+}
+
+export interface BanCheckAllResult {
+  results: BanCheckResult[];
+  total: number;
+  ok: number;
+  banned: number;
+  session_dead: number;
+  failed: number;
+}
+
 export interface CatBuddy {
   id: number;
   name: string;
