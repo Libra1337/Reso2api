@@ -57,11 +57,27 @@ export default function FirewallPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [detail, setDetail] = useState<number | null>(null); // 打开弹窗的事件索引
+  const [page, setPage] = useState(0);
+  const [paged, setPaged] = useState<{
+    total: number;
+    pageCount: number;
+  } | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (p = 0) => {
     setRefreshing(true);
     try {
-      setData(await api.firewallStats());
+      const [stats, pageData] = await Promise.all([
+        api.firewallStats(),
+        api.firewallPage(p, 100),
+      ]);
+      setData(stats);
+      if (pageData.events.length > 0 || p === 0) {
+        setData((prev) => (prev ? { ...prev, events: pageData.events } : prev));
+        setPaged({
+          total: pageData.total,
+          pageCount: Math.max(Math.ceil(pageData.total / 100), 1),
+        });
+      }
     } catch {
       /* keep */
     } finally {
@@ -71,10 +87,10 @@ export default function FirewallPage() {
   }, []);
 
   useEffect(() => {
-    void load();
-    const id = setInterval(() => void load(), 30_000);
+    void load(0);
+    const id = setInterval(() => void load(page), 30_000);
     return () => clearInterval(id);
-  }, [load]);
+  }, [load, page]);
 
   const events = data?.events ?? [];
   const rules = data?.rules ?? [];
@@ -219,42 +235,72 @@ export default function FirewallPage() {
               暂无拦截记录——防护开启以来没有违禁内容触达网关
             </p>
           ) : (
-            <div className="h-80 space-y-1.5 overflow-y-auto pr-1">
-              {events.map((e, i) => {
-                const meta = RULE_LEVEL[e.rule];
-                return (
-                  <div
-                    key={`${e.at}-${i}`}
-                    className="flex cursor-pointer items-start gap-2 rounded-md bg-muted/40 px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
-                    onClick={() => setDetail(i)}
-                    title="点击查看完整内容"
-                  >
-                    <span className="shrink-0 tabular-nums text-muted-foreground">
-                      {fmtTime(e.at)}
-                    </span>
-                    <span
-                      className={cn(
-                        "shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium",
-                        levelStyle[meta?.level ?? "C"],
-                      )}
+            <>
+              <div className="h-80 space-y-1.5 overflow-y-auto pr-1">
+                {events.map((e, i) => {
+                  const meta = RULE_LEVEL[e.rule];
+                  return (
+                    <div
+                      key={`${e.at}-${i}`}
+                      className="flex cursor-pointer items-start gap-2 rounded-md bg-muted/40 px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
+                      onClick={() => setDetail(i)}
+                      title="点击查看完整内容"
                     >
-                      {meta?.label ?? e.rule}
-                    </span>
-                    <span className="min-w-0 flex-1">
+                      <span className="shrink-0 tabular-nums text-muted-foreground">
+                        {fmtTime(e.at)}
+                      </span>
                       <span
-                        className="block truncate text-muted-foreground"
-                        title={e.snippet}
+                        className={cn(
+                          "shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium",
+                          levelStyle[meta?.level ?? "C"],
+                        )}
                       >
-                        {e.snippet || "（无文本内容）"}
+                        {meta?.label ?? e.rule}
                       </span>
-                      <span className="mt-0.5 block font-mono text-[10px] text-muted-foreground/70">
-                        {e.model || "-"} · {(e.uid || "").slice(0, 8)}
+                      <span className="min-w-0 flex-1">
+                        <span
+                          className="block truncate text-muted-foreground"
+                          title={e.snippet}
+                        >
+                          {e.snippet || "（无文本内容）"}
+                        </span>
+                        <span className="mt-0.5 block font-mono text-[10px] text-muted-foreground/70">
+                          {e.model || "-"} · {(e.uid || "").slice(0, 8)}
+                        </span>
                       </span>
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
+                <span>
+                  共 {paged?.total ?? 0} 条（永久保留）· 第 {page + 1}/
+                  {paged?.pageCount ?? 1} 页
+                </span>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7"
+                    disabled={page === 0 || refreshing}
+                    onClick={() => setPage((v) => Math.max(0, v - 1))}
+                  >
+                    上一页
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7"
+                    disabled={
+                      !paged || page + 1 >= paged.pageCount || refreshing
+                    }
+                    onClick={() => setPage((v) => v + 1)}
+                  >
+                    下一页
+                  </Button>
+                </div>
+              </div>
+            </>
           )}
         </CardContent>
       </Card>

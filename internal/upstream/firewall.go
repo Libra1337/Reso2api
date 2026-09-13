@@ -170,15 +170,17 @@ func (c *Client) recordFirewallHit(a *auth.Auth, rule, model string, prepared []
 	if a != nil {
 		uid = a.UID
 	}
-	c.fwMu.Lock()
-	defer c.fwMu.Unlock()
-	c.fwHits = append(c.fwHits, FirewallEvent{
+	ev := FirewallEvent{
 		At: time.Now().Unix(), Rule: rule, UID: uid, Model: model,
 		Snippet: snippet, Content: content,
-	})
+	}
+	c.fwMu.Lock()
+	c.fwHits = append(c.fwHits, ev)
 	if len(c.fwHits) > firewallEventCap {
 		c.fwHits = c.fwHits[len(c.fwHits)-firewallEventCap:]
 	}
+	c.fwMu.Unlock()
+	appendFirewallLog(ev) // 永久落盘（永不删除）
 }
 
 // FirewallEvents 返回命中事件（旧→新）副本。

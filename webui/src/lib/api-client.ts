@@ -86,6 +86,30 @@ export const api = {
   travelClaimAll: () =>
     request<import("@/types").SimpleResult>("/travel/claim_all", {}),
 
+  firewallPage: (page = 0, size = 100) =>
+    request<import("@/types").FirewallPageResult>(
+      `/firewall/page?page=${page}&size=${size}`,
+    ),
+
+  reqLogPage: (page = 0, size = 100) =>
+    request<import("@/types").ReqLogPageResult>(
+      `/request_logs/page?page=${page}&size=${size}`,
+    ),
+
+  reqLogBodyUrl: (file: string) =>
+    `/request_logs/body?file=${encodeURIComponent(file)}`,
+
+  reqLogBody: async (file: string): Promise<string> => {
+    const res = await fetch(
+      `/request_logs/body?file=${encodeURIComponent(file)}`,
+      {
+        credentials: "same-origin",
+      },
+    );
+    if (!res.ok) throw new Error(`加载失败 (${res.status})`);
+    return res.text();
+  },
+
   firewallStats: () =>
     request<import("@/types").FirewallStatsResult>("/firewall/stats"),
 

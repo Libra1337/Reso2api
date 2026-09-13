@@ -132,6 +132,19 @@ func NewHandler(cfg Config) *Handler {
 	return h
 }
 
+// RequestLogsPage 请求日志永久历史分页（newest-first）。
+func (h *Handler) RequestLogsPage(page, size int) ([]ReqLog, int) {
+	return h.reqLogs.Page(page, size)
+}
+
+// ReadBodyArchive 读回请求体存档。
+func (h *Handler) ReadBodyArchive(name string) ([]byte, bool) {
+	return h.reqLogs.ReadBodyArchive(name)
+}
+
+// SetBodyArchiveDir 设置请求体存档目录（main 启动时调用）。
+func (h *Handler) SetBodyArchiveDir(dir string) { h.reqLogs.SetBodiesDir(dir) }
+
 // Close 释放持有的资源（请求日志 journal 句柄）；进程退出时调用。
 func (h *Handler) Close() { h.reqLogs.close() }
 
@@ -433,7 +446,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if ttw != nil {
 			ttw.Finish()
 		}
-		h.finishReqLog(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, true, fbw.ttfb(), tee.snapshot())
+		h.finishReqLog(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, true, fbw.ttfb(), tee.snapshot(), body)
 		_ = err
 		return
 	}
@@ -446,7 +459,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		wrapThinkTag(resp)
 	}
 	usage, _ := resp["usage"].(map[string]any)
-	h.finishReqLog(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, false, 0, usage)
+	h.finishReqLog(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, false, 0, usage, body)
 	writeJSON(fbw, http.StatusOK, resp)
 }
 
@@ -572,7 +585,7 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
 				_, _ = w.Write(respBody)
-				h.finishReqLog(t0, model, rt.Kind.String(), acct.UID, status, false, 0, nil)
+				h.finishReqLog(t0, model, rt.Kind.String(), acct.UID, status, false, 0, nil, body)
 				return nil, "", false
 			}
 			lastErr = &provider.Error{Kind: kind, Status: status, Msg: string(respBody)}
@@ -615,7 +628,7 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(lastStatus)
 		_, _ = w.Write(lastBody)
-		h.finishReqLog(t0, model, rt.Kind.String(), "", lastStatus, false, 0, nil)
+		h.finishReqLog(t0, model, rt.Kind.String(), "", lastStatus, false, 0, nil, body)
 		return nil, "", false
 	}
 	msg := "all accounts unavailable (cooling/disabled)"
@@ -623,7 +636,7 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		msg += ": " + lastErr.Error()
 	}
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
-	h.finishReqLog(t0, model, rt.Kind.String(), "", http.StatusServiceUnavailable, false, 0, nil)
+	h.finishReqLog(t0, model, rt.Kind.String(), "", http.StatusServiceUnavailable, false, 0, nil, body)
 	return nil, "", false
 }
 

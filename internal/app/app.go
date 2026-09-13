@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -615,6 +616,32 @@ func (a *App) TaskFeed() map[string]any {
 		"travel_running":   a.travelRuns > 0,
 		"activity_running": a.activityRuns > 0,
 	}
+}
+
+// pageParams 解析 page/size 查询参数（size 上限 1000，默认 100）。
+func pageParams(r *http.Request) (page, size int) {
+	page, size = 0, 100
+	if v, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && v >= 0 {
+		page = v
+	}
+	if v, err := strconv.Atoi(r.URL.Query().Get("size")); err == nil && v > 0 && v <= 1000 {
+		size = v
+	}
+	return
+}
+
+// FirewallPage 防火墙永久日志分页。
+func (a *App) FirewallPage(page, size int) ([]upstream.FirewallEvent, int) {
+	rt := a.runtime(provider.WorkBuddy)
+	if rt == nil || rt.Upstream == nil {
+		return nil, 0
+	}
+	if api, ok := rt.Upstream.(interface {
+		FirewallEventsPaged(page, size int) ([]upstream.FirewallEvent, int)
+	}); ok {
+		return api.FirewallEventsPaged(page, size)
+	}
+	return nil, 0
 }
 
 // FirewallStats 防火墙拦截统计（事件环形 + 规则分布）。
@@ -1543,6 +1570,29 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	// 内容防火墙：拦截事件与统计（面板「防火墙」页）。
 	inner.HandleFunc("GET /api/firewall/stats", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, a.FirewallStats())
+	})
+	// 防火墙历史分页（永久日志，newest-first；page 从 0 起）。
+	inner.HandleFunc("GET /api/firewall/page", func(w http.ResponseWriter, r *http.Request) {
+		page, size := pageParams(r)
+		events, total := a.FirewallPage(page, size)
+		writeJSON(w, http.StatusOK, map[string]any{"events": events, "total": total, "page": page, "size": size})
+	})
+	// 请求日志历史分页（永久 jsonl，newest-first）。
+	inner.HandleFunc("GET /api/request_logs/page", func(w http.ResponseWriter, r *http.Request) {
+		page, size := pageParams(r)
+		logs, total := a.handler.RequestLogsPage(page, size)
+		writeJSON(w, http.StatusOK, map[string]any{"logs": logs, "total": total, "page": page, "size": size})
+	})
+	// 请求体存档回看（详情弹窗：完整请求内容）。
+	inner.HandleFunc("GET /api/request_logs/body", func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("file")
+		raw, ok := a.handler.ReadBodyArchive(name)
+		if !ok {
+			apiError(w, http.StatusNotFound, "存档不存在（未采样或已过期路径）")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write(raw)
 	})
 	// 用量统计：官方请求用量（积分消耗）× 账号/模型/日 聚合 + 请求日志 token 统计。
 	inner.HandleFunc("GET /api/usage/stats", func(w http.ResponseWriter, r *http.Request) {

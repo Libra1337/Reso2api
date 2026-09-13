@@ -6,9 +6,12 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,6 +30,9 @@ type ReqLog struct {
 	OutTokens    int64   `json:"out_tokens"`
 	CachedTokens int64   `json:"cached_tokens"`
 	Credit       float64 `json:"credit"`
+	// BodyFile 请求体存档文件名（data/reqlog_bodies/<file>；空 = 未存档）。
+	// 网关按 10% 采样存档（详见 handler logging），供面板回看完整请求内容。
+	BodyFile string `json:"body_file,omitempty"`
 }
 
 // reqLogMemCap 面板内存窗口大小；完整历史在 jsonl 追加日志里永久保留。
@@ -38,6 +44,7 @@ type reqLogStore struct {
 	path    string   // jsonl 追加日志路径（每请求一行，永不删除）
 	legacy  string   // 旧版单 JSON 文件路径（存在则一次性导入）
 	journal *os.File
+	bodies  string // 请求体存档目录（10% 采样，面板详情回看）
 }
 
 // load 启动时恢复：优先读 jsonl 日志尾窗；日志为空且存在旧版 JSON 时一次性导入。
@@ -71,6 +78,9 @@ func (s *reqLogStore) load() {
 	}
 	if len(s.logs) > reqLogMemCap {
 		s.logs = s.logs[len(s.logs)-reqLogMemCap:]
+	}
+	if s.bodies != "" {
+		_ = os.MkdirAll(s.bodies, 0o700)
 	}
 	if f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
 		s.journal = f
@@ -106,6 +116,88 @@ func (s *reqLogStore) add(l ReqLog) {
 	s.trimMemLocked()
 }
 
+// SetBodiesDir 设置请求体存档目录（main 启动时调用）。
+func (s *reqLogStore) SetBodiesDir(dir string) { s.bodies = dir }
+
+// SaveBodyArchive 采样存档请求体（10% 概率；成功返回文件名）。
+// 存档永不删除——"请求日志永久保留且可回看完整内容"的一部分。
+func (s *reqLogStore) SaveBodyArchive(body []byte) string {
+	if s.bodies == "" || len(body) == 0 {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if randIntn(10) != 0 { // 10% 采样
+		return ""
+	}
+	if r := []rune(string(body)); len(r) > 256*1024 { // 单条 256KiB 上限
+		trunc := string([]rune(string(body))[:256*1024]) + "\n…（过长截断）"
+		body = []byte(trunc)
+	}
+	name := fmt.Sprintf("%d-%s.json", time.Now().UnixMilli(), randHex4())
+	fp := filepath.Join(s.bodies, name)
+	tmp := fp + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		return ""
+	}
+	if err := os.Rename(tmp, fp); err != nil {
+		return ""
+	}
+	return name
+}
+
+// ReadBodyArchive 读回请求体存档。
+func (s *reqLogStore) ReadBodyArchive(name string) ([]byte, bool) {
+	if s.bodies == "" || name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
+		return nil, false
+	}
+	raw, err := os.ReadFile(filepath.Join(s.bodies, name))
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+// Page 按页读取 jsonl 永久日志（newest-first 页序；page=0 最新一页）。
+// 与内存窗口无关——完整历史都在磁盘上，翻多旧都能翻到。
+func (s *reqLogStore) Page(page, size int) ([]ReqLog, int) {
+	if size <= 0 || size > 1000 {
+		size = 100
+	}
+	if page < 0 {
+		page = 0
+	}
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
+		return nil, 0
+	}
+	var all []ReqLog
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var l ReqLog
+		if json.Unmarshal(line, &l) == nil {
+			all = append(all, l)
+		}
+	}
+	total := len(all)
+	start := total - (page+1)*size // newest-first
+	if start < 0 {
+		start = 0
+	}
+	end := total - page*size
+	if end < 0 {
+		return nil, total
+	}
+	out := make([]ReqLog, 0, end-start)
+	for i := end - 1; i >= start; i-- { // 倒序（新→旧）
+		out = append(out, all[i])
+	}
+	return out, total
+}
+
 // close 关闭日志句柄（进程退出/测试清理用）。
 func (s *reqLogStore) close() {
 	s.mu.Lock()
@@ -128,7 +220,7 @@ func (h *Handler) RequestLogs() []ReqLog {
 }
 
 // finishReqLog 从上游 usage 对象提取指标并落账。
-func (h *Handler) finishReqLog(t0 time.Time, model, channel, uid string, status int, stream bool, ttfb time.Duration, usage map[string]any) {
+func (h *Handler) finishReqLog(t0 time.Time, model, channel, uid string, status int, stream bool, ttfb time.Duration, usage map[string]any, reqBody []byte) {
 	l := ReqLog{
 		Time:    t0.Format("01-02 15:04:05"),
 		Model:   model,
@@ -139,6 +231,7 @@ func (h *Handler) finishReqLog(t0 time.Time, model, channel, uid string, status 
 		TTFBMS:  ttfb.Milliseconds(),
 		TotalMS: time.Since(t0).Milliseconds(),
 	}
+	l.BodyFile = h.reqLogs.SaveBodyArchive(reqBody)
 	if usage != nil {
 		l.InTokens = num(usage["prompt_tokens"])
 		l.OutTokens = num(usage["completion_tokens"])
@@ -254,3 +347,6 @@ func (f *firstByteWriter) ttfb() time.Duration {
 	}
 	return f.first.Sub(f.t0)
 }
+
+func randHex4() string   { return fmt.Sprintf("%04x", time.Now().UnixNano()%0xffff) }
+func randIntn(n int) int { return int(time.Now().UnixNano()/int64(time.Microsecond)) % n }

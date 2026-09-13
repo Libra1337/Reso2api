@@ -628,7 +628,7 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 	usage, ttfb := h.responsesRelay(w, rc, model, wantStream.Stream, t0)
-	h.finishReqLog(t0, model, rt.Kind.String(), uid, http.StatusOK, wantStream.Stream, ttfb, usage)
+	h.finishReqLog(t0, model, rt.Kind.String(), uid, http.StatusOK, wantStream.Stream, ttfb, usage, chatBody)
 }
 
 func randHex(n int) string {

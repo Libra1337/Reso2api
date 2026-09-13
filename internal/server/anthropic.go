@@ -266,7 +266,7 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 	fbw := newFirstByteWriter(w, t0)
 	if peek.Stream {
 		usage := anthropicRelay(fbw, rc, peek.Model)
-		h.finishReqLog(t0, "anthropic/"+peek.Model, rt.Kind.String(), uid, http.StatusOK, true, fbw.ttfb(), usage)
+		h.finishReqLog(t0, "anthropic/"+peek.Model, rt.Kind.String(), uid, http.StatusOK, true, fbw.ttfb(), usage, chatBody)
 		return
 	}
 	resp, err := rt.Upstream.Aggregate(rc)
@@ -275,7 +275,7 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	usage, _ := resp["usage"].(map[string]any)
-	h.finishReqLog(t0, "anthropic/"+peek.Model, rt.Kind.String(), uid, http.StatusOK, false, 0, usage)
+	h.finishReqLog(t0, "anthropic/"+peek.Model, rt.Kind.String(), uid, http.StatusOK, false, 0, usage, chatBody)
 	out := anthropicFromAggregate(resp, peek.Model)
 	writeJSON(fbw, http.StatusOK, out)
 }

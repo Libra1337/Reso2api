@@ -85,6 +85,7 @@ export interface LogsData {
 
 export interface ReqLog {
   time: string;
+  body_file?: string;
   model: string;
   channel: string;
   uid: string;
@@ -282,4 +283,34 @@ export interface FirewallStatsResult {
   today: number;
   events: FirewallEvent[];
   rules: { rule: string; count: number }[];
+}
+
+export interface ReqLogEntry {
+  time: string;
+  model: string;
+  channel: string;
+  uid: string;
+  status: number;
+  stream: boolean;
+  ttfb_ms: number;
+  total_ms: number;
+  in_tokens: number;
+  out_tokens: number;
+  cached_tokens: number;
+  credit: number;
+  body_file?: string;
+}
+
+export interface ReqLogPageResult {
+  logs: ReqLogEntry[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+export interface FirewallPageResult {
+  events: FirewallEvent[];
+  total: number;
+  page: number;
+  size: number;
 }
