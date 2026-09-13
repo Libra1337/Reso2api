@@ -109,6 +109,12 @@ func main() {
 	wbUp := upstream.New()
 	wbUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	wbUp.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
+	// 客户端风控指纹（对齐官方桌面端）：UA 三段式 + 用量归属四头 + X-Device-Token
+	wbUp.ClientName = cfg.Upstream.ClientName
+	wbUp.ClientVersion = cfg.Upstream.ClientVersion
+	wbUp.CliVersion = cfg.Upstream.CliVersion
+	wbUp.DeviceToken = cfg.Upstream.DeviceToken
+	wbUp.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
 	// 系统提示词策略：passthrough（默认）透传客户端 system，被 11128 拦截时
 	// 自动降级中性提示词重试；custom 用内置/文件提示词整段替换。
 	switch cfg.Prompt.Mode {

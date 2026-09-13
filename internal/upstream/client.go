@@ -111,6 +111,19 @@ type Client struct {
 	// PromptText custom 模式使用的提示词文本（空 = 内置默认）。
 	PromptText string
 
+	// ── 设备/客户端风控指纹（对齐官方桌面端，来自上游 1f78ad0/a65a36d/7b500f4）──
+	// ClientName 用量归属名（如 "WorkBuddy"）：非空时 chat 注入
+	// X-Agent-Purpose=conversation + X-IDE-Name/Type/Version + X-Product 四头组，
+	// billing/growth 注入单段 WorkBuddy UA；空 = 保持旧 SaaS 兼容形态。
+	ClientName string
+	// ClientVersion/CliVersion UA 版本段（空 = 内置默认 5.5.4 / 2.137.1）。
+	ClientVersion string
+	CliVersion    string
+	// DeviceToken X-Device-Token 全局兜底（auth 每号 > 此处 > DeviceTokenFile）。
+	DeviceToken string
+	// DeviceTokenFile 设备 token 文件兜底路径。
+	DeviceTokenFile string
+
 	// degradeMu/degradeUntil 11128 降级窗口截止（passthrough 模式）。
 	degradeMu    sync.Mutex
 	degradeUntil time.Time
@@ -351,7 +364,7 @@ func (c *Client) chatOnce(a *auth.Auth, prepared []byte) (rc io.ReadCloser, stat
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	ChatHeaders(req, a)
+	c.ChatHeaders(req, a)
 	resp, err := c.streamClient().Do(req)
 	if err != nil {
 		log.Printf("chat_stream uid=%s: transport error: %v", a.UID, err)
@@ -389,7 +402,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	origin := originRefererFor(snap.Region)
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", clientUA)
+	req.Header.Set("User-Agent", c.chatUA())
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
@@ -495,7 +508,7 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 	if err != nil {
 		return 0, err
 	}
-	BillingHeaders(req, a)
+	c.BillingHeaders(req, a)
 	data, err := c.doJSONBilling(req)
 	if err != nil {
 		return 0, err
@@ -553,7 +566,7 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 	if err != nil {
 		return 0, nil, err
 	}
-	BillingHeaders(req, a)
+	c.BillingHeaders(req, a)
 	data, err := c.doJSONBilling(req)
 	if err != nil {
 		return 0, nil, err
@@ -627,7 +640,7 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 	if err != nil {
 		return err
 	}
-	BillingHeaders(req, a)
+	c.BillingHeaders(req, a)
 	_, err = c.doJSONBilling(req)
 	if err != nil {
 		log.Printf("workbuddy checkin failed uid=%s err=%v", a.UID, err)
@@ -660,7 +673,7 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 	origin := originRefererFor(snap.Region)
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", clientUA)
+	req.Header.Set("User-Agent", c.chatUA())
 	req.Header.Set("X-User-Id", a.UID)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {

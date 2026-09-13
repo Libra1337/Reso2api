@@ -25,6 +25,10 @@ type Auth struct {
 	ApiHost      string // TraeWork: https://api.trae.com.cn
 	MachineID    string // TraeWork: x-machine-id
 	DeviceID     string // TraeWork: x-device-id
+	// DeviceToken 设备风控 Token（X-Device-Token 头），来源 auth 文件 device_token 键。
+	// 上游 Turing Shield 设备风控：官方桌面端生成；此处三源可选注入（每号 > 全局 > 文件）。
+	DeviceToken string
+
 	// QoderWork COSY 机器指纹（登录/刷新时生成，持久化到 auth 文件）
 	MachineToken string // Qoder: cosy-machinetoken
 	MachineType  string // Qoder: cosy-machinetype
@@ -171,6 +175,7 @@ func Parse(raw []byte) (*Auth, error) {
 			DeviceID     string `json:"deviceId"`
 			MachineToken string `json:"machineToken"`
 			MachineType  string `json:"machineType"`
+			DeviceToken  string `json:"device_token"`
 			UID          string `json:"uid"`
 			EnterpriseID string `json:"enterpriseId"`
 			Nickname     string `json:"nickname"`
@@ -230,6 +235,9 @@ func (a *Auth) saveAtomicLocked() error {
 			"enterpriseId": a.EnterpriseID,
 			"nickname":     a.Nickname,
 		},
+	}
+	if a.DeviceToken != "" {
+		doc["device_token"] = a.DeviceToken
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

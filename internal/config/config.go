@@ -118,6 +118,13 @@ type Config struct {
 
 	Upstream struct {
 		TimeoutSeconds int `json:"timeout_seconds"` // 默认 120
+		// 客户端风控指纹（对齐官方桌面端）：
+		// ClientName 非空（如 "WorkBuddy"）→ chat 四头组 + billing WorkBuddy UA
+		ClientName      string `json:"client_name,omitempty"`
+		ClientVersion   string `json:"client_version,omitempty"`    // 空 = 5.5.4
+		CliVersion      string `json:"cli_version,omitempty"`       // 空 = 2.137.1
+		DeviceToken     string `json:"device_token,omitempty"`      // X-Device-Token 全局兜底
+		DeviceTokenFile string `json:"device_token_file,omitempty"` // 文件兜底
 	} `json:"upstream"`
 
 	Features struct {
