@@ -90,6 +90,8 @@ export const api = {
 
   tasks: () => request<import("@/types").TaskFeedResult>("/tasks"),
 
+  limits: () => request<import("@/types").LimitsResult>("/limits"),
+
   activityRunAll: () =>
     request<import("@/types").SimpleResult>("/activity/run_all", {}),
 

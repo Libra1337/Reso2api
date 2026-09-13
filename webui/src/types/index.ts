@@ -178,3 +178,27 @@ export interface TaskFeedResult {
   travel_running: boolean;
   activity_running: boolean;
 }
+
+export interface ModelCoolEntry {
+  uid: string;
+  until: string;
+}
+
+export interface ModelLimitItem {
+  model: string;
+  cooled: ModelCoolEntry[];
+  total: number;
+  available: number;
+}
+
+export interface AccountCoolItem {
+  uid: string;
+  nickname: string;
+  reason: string;
+  until: string;
+}
+
+export interface LimitsResult {
+  models: ModelLimitItem[];
+  account_cooling: AccountCoolItem[];
+}

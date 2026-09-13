@@ -572,6 +572,45 @@ func (a *App) TaskFeed() map[string]any {
 	}
 }
 
+// LimitsOverview 模型限流总览（面板「模型限流」页）。
+func (a *App) LimitsOverview() map[string]any {
+	type acctCool struct {
+		UID      string    `json:"uid"`
+		Nickname string    `json:"nickname"`
+		Reason   string    `json:"reason"`
+		Until    time.Time `json:"until"`
+	}
+	models := []map[string]any{}
+	cooling := []acctCool{}
+	for _, rt := range a.runtimes {
+		if rt == nil || rt.Pool == nil {
+			continue
+		}
+		prefix := ""
+		if rt.Kind != provider.WorkBuddy {
+			prefix = rt.Kind.String() + "/"
+		}
+		for _, m := range rt.Pool.ModelCooldowns() {
+			name := m.Model
+			if prefix != "" {
+				name = prefix + m.Model
+			}
+			models = append(models, map[string]any{
+				"model":     name,
+				"cooled":    m.Cooled,
+				"total":     m.Total,
+				"available": m.Available,
+			})
+		}
+		for _, st := range rt.Pool.List() {
+			if st.Cooling && !st.Disabled {
+				cooling = append(cooling, acctCool{UID: st.UID, Nickname: st.Nickname, Reason: st.Reason, Until: st.Until})
+			}
+		}
+	}
+	return map[string]any{"models": models, "account_cooling": cooling}
+}
+
 // TravelStatusEntry 猫猫乐园单账号状态。
 type TravelStatusEntry struct {
 	UID      string                 `json:"uid"`
@@ -1174,6 +1213,11 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	// 任务动态流：旅行巡检/活跃上报的实时逐账号反馈（面板轮询）。
 	inner.HandleFunc("GET /api/tasks", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, a.TaskFeed())
+	})
+	// 模型限流总览：6004 模型级限额（哪些模型在哪些号上被限、何时重置）
+	// + 整号冷却明细（429/欠费/连续错误）。
+	inner.HandleFunc("GET /api/limits", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, a.LimitsOverview())
 	})
 	inner.HandleFunc("POST /api/account/refresh", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

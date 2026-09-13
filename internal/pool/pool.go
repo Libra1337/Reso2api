@@ -330,6 +330,59 @@ func (p *Pool) CooledForModel(uid, model string) bool {
 	return ok && time.Now().Before(until)
 }
 
+// ModelCoolEntry 单账号在某模型上的冷却明细。
+type ModelCoolEntry struct {
+	UID   string    `json:"uid"`
+	Until time.Time `json:"until"`
+}
+
+// ModelCoolSummary 模型维度的限流聚合（面板「模型限流」页数据源）。
+type ModelCoolSummary struct {
+	Model     string           `json:"model"`
+	Cooled    []ModelCoolEntry `json:"cooled"`  // 被限账号（按重置时间升序）
+	Total     int              `json:"total"`   // 未禁用账号总数
+	Available int              `json:"available"` // 当前可用的账号数
+}
+
+// ModelCooldowns 聚合全部模型级冷却（6004），顺手清理过期项。
+// 只返回有活跃冷却的模型。
+func (p *Pool) ModelCooldowns() []ModelCoolSummary {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	agg := map[string][]ModelCoolEntry{}
+	total := 0
+	for uid, e := range p.byUID {
+		if e.disabled {
+			continue
+		}
+		total++
+		for model, until := range e.modelCool {
+			if !now.Before(until) {
+				delete(e.modelCool, model) // 过期清理
+				continue
+			}
+			agg[model] = append(agg[model], ModelCoolEntry{UID: uid, Until: until})
+		}
+	}
+	if len(agg) == 0 {
+		return nil
+	}
+	out := make([]ModelCoolSummary, 0, len(agg))
+	for model, entries := range agg {
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Until.Before(entries[j].Until) })
+		out = append(out, ModelCoolSummary{
+			Model:     model,
+			Cooled:    entries,
+			Total:     total,
+			Available: total - len(entries),
+		})
+	}
+	// 被限账号最多的模型排前面（最受关注的先看）
+	sort.Slice(out, func(i, j int) bool { return len(out[i].Cooled) > len(out[j].Cooled) })
+	return out
+}
+
 // SessionDeadThreshold 暴露连续 12153 的禁用阈值（调度日志/运维引用）。
 func SessionDeadThreshold() int { return sessionDeadThreshold }
 
