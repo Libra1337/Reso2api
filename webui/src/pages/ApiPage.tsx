@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react"
+import { useState, type ReactNode } from "react"
 import {
   CalendarClock,
   CalendarCheck2,
@@ -347,15 +347,14 @@ function ScheduleCard({
   )
 }
 
-function JudgeCard({
+function JudgeDialog({
   data,
-  loading,
-  onChanged,
+  onSaved,
 }: {
   data?: AppState
-  loading: boolean
-  onChanged: () => void
+  onSaved: () => void
 }) {
+  const [open, setOpen] = useState(false)
   const [enabled, setEnabled] = useState(false)
   const [baseUrl, setBaseUrl] = useState("")
   const [apiKey, setApiKey] = useState("")
@@ -364,17 +363,21 @@ function JudgeCard({
   const [showKey, setShowKey] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [hydrated, setHydrated] = useState(false)
 
-  useEffect(() => {
-    if (!data || hydrated) return
-    setEnabled(!!data.judge_enabled)
-    setBaseUrl(data.judge_base_url || "")
-    setApiKey(data.judge_api_key || "")
-    setModel(data.judge_model || "")
-    setTimeoutMs(data.judge_timeout_ms > 0 ? data.judge_timeout_ms : 4000)
-    setHydrated(true)
-  }, [data, hydrated])
+  const fill = () => {
+    setEnabled(!!data?.judge_enabled)
+    setBaseUrl(data?.judge_base_url || "")
+    setApiKey(data?.judge_api_key || "")
+    setModel(data?.judge_model || "")
+    setTimeoutMs(data?.judge_timeout_ms && data.judge_timeout_ms > 0 ? data.judge_timeout_ms : 4000)
+    setShowKey(false)
+    setError(null)
+  }
+
+  const handleOpenChange = (next: boolean) => {
+    if (next) fill()
+    setOpen(next)
+  }
 
   const save = async () => {
     setSaving(true)
@@ -387,7 +390,8 @@ function JudgeCard({
         model: model.trim(),
         timeout_ms: timeoutMs,
       })
-      onChanged()
+      setOpen(false)
+      onSaved()
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "保存失败")
     } finally {
@@ -396,6 +400,117 @@ function JudgeCard({
   }
 
   return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogTrigger
+        render={
+          <Button variant="outline" size="sm" className="h-10 w-full sm:h-7 sm:w-auto" />
+        }
+      >
+        <Pencil className="mr-1.5 h-3.5 w-3.5" />
+        配置审查
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>外部审查</DialogTitle>
+          <DialogDescription>
+            关键词只做提示。真正拦不拦由外部 LLM 判定：porn / political 才拦截；
+            未启用、未配齐或审查失败一律放行。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          {error && (
+            <Alert variant="destructive">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
+          <label className="flex items-center justify-between rounded-lg border border-border/60 bg-muted/25 px-3 py-2.5 text-sm">
+            <span>
+              启用 LLM 审查
+              <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                配齐 Base URL、模型、API Key 后才会生效
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              className="size-4"
+              checked={enabled}
+              onChange={(e) => setEnabled(e.target.checked)}
+            />
+          </label>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-1.5 sm:col-span-2">
+              <label className="text-xs text-muted-foreground">审核 Base URL</label>
+              <Input
+                placeholder="https://api.openai.com"
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                className="h-10 font-mono text-xs md:h-8"
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <label className="text-xs text-muted-foreground">审核模型</label>
+              <Input
+                placeholder="gpt-4.1-mini"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                className="h-10 font-mono text-xs md:h-8"
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <label className="text-xs text-muted-foreground">超时（毫秒）</label>
+              <Input
+                type="number"
+                min={500}
+                step={500}
+                value={timeoutMs}
+                onChange={(e) => setTimeoutMs(Number(e.target.value) || 4000)}
+                className="h-10 font-mono text-xs md:h-8"
+              />
+            </div>
+            <div className="grid gap-1.5 sm:col-span-2">
+              <label className="text-xs text-muted-foreground">审核 API Key</label>
+              <div className="flex items-center gap-1">
+                <Input
+                  placeholder="sk-..."
+                  type={showKey ? "text" : "password"}
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  className="h-10 font-mono text-xs md:h-8"
+                />
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => setShowKey((v) => !v)}
+                  aria-label={showKey ? "隐藏 Key" : "显示 Key"}
+                >
+                  {showKey ? <EyeOff /> : <Eye />}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <DialogFooter>
+          <DialogClose render={<Button variant="outline" />}>取消</DialogClose>
+          <Button onClick={() => void save()} disabled={saving}>
+            {saving ? <LoadingSpinner size={16} className="mr-2" /> : null}
+            保存
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function JudgeCard({
+  data,
+  loading,
+  onChanged,
+}: {
+  data?: AppState
+  loading: boolean
+  onChanged: () => void
+}) {
+  return (
     <Card className="border-border/60 shadow-sm">
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-sm font-medium">
@@ -403,79 +518,25 @@ function JudgeCard({
           外部审查
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3">
-        {loading && !hydrated ? (
-          <>
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-full" />
-          </>
+      <CardContent>
+        {loading && !data ? (
+          <Skeleton className="h-14 w-full" />
         ) : (
-          <>
-            <p className="text-xs text-muted-foreground">
-              关键词只做提示。真正拦不拦由外部 LLM 判定：porn / political 才拦截；
-              未启用、未配齐或审查失败一律放行。
-            </p>
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={enabled}
-                onChange={(e) => setEnabled(e.target.checked)}
-              />
-              启用 LLM 审查
-              <span className="text-xs text-muted-foreground">
-                {data?.judge_active ? "当前生效" : "当前未生效"}
-              </span>
-            </label>
-            <Input
-              placeholder="审核 Base URL，例如 https://api.openai.com"
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-              className="font-mono text-xs"
-            />
-            <Input
-              placeholder="审核模型名"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              className="font-mono text-xs"
-            />
-            <div className="flex items-center gap-1">
-              <Input
-                placeholder="审核 API Key"
-                type={showKey ? "text" : "password"}
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                className="font-mono text-xs"
-              />
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => setShowKey((v) => !v)}
-                aria-label={showKey ? "隐藏 Key" : "显示 Key"}
-              >
-                {showKey ? <EyeOff /> : <Eye />}
-              </Button>
-            </div>
-            <div className="flex items-center gap-2">
-              <Input
-                type="number"
-                min={500}
-                step={500}
-                value={timeoutMs}
-                onChange={(e) => setTimeoutMs(Number(e.target.value) || 4000)}
-                className="w-32 font-mono text-xs"
-              />
-              <span className="text-xs text-muted-foreground">超时毫秒，超时放行</span>
-            </div>
-            {error && (
-              <Alert variant="destructive">
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            )}
-            <Button size="sm" onClick={() => void save()} disabled={saving}>
-              {saving ? <LoadingSpinner size={14} className="mr-1.5" /> : null}
-              保存审查设置
-            </Button>
-          </>
+          <ScheduleRow
+            icon={<ShieldAlert className="size-4" />}
+            label="LLM 审查"
+            description="关键词命中后交外部模型判定，未配置则放行"
+            action={<JudgeDialog data={data} onSaved={onChanged} />}
+          >
+            <Badge variant={data?.judge_active ? "default" : "secondary"}>
+              {data?.judge_active ? "已生效" : data?.judge_enabled ? "未配齐" : "未启用"}
+            </Badge>
+            {data?.judge_model ? (
+              <Badge variant="outline" className="font-mono">
+                {data.judge_model}
+              </Badge>
+            ) : null}
+          </ScheduleRow>
         )}
       </CardContent>
     </Card>
