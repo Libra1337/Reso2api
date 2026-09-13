@@ -110,6 +110,9 @@ type Client struct {
 	// 拦截会导致上游整号拉黑的高危内容（未成年+NSFW、越狱声明），保护账号池。
 	ContentFirewall bool
 
+	fwMu   sync.Mutex      // 防火墙命中事件锁
+	fwHits []FirewallEvent // 环形（最新在后，cap 500，内存态）
+
 	// PromptMode 系统提示词策略（internal/prompt）：
 	//   - "custom"：出站前用 PromptText 替换客户端 system/developer（源头消灭 system 指纹误报）；
 	//   - "passthrough"（默认）：透传客户端原始 system；被 11128 内容拦截时
@@ -369,6 +372,7 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	if c.ContentFirewall {
 		if rule, hit := FirewallCheck(prepared); hit {
 			log.Printf("FIREWALL uid=%s rule=%s -> blocked (content not sent upstream)", a.UID, rule)
+			c.recordFirewallHit(a, rule, extractModel(prepared), prepared)
 			return nil, http.StatusForbidden, FirewallHitResponse(rule), nil
 		}
 	}

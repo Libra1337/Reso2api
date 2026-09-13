@@ -617,6 +617,51 @@ func (a *App) TaskFeed() map[string]any {
 	}
 }
 
+// FirewallStats 防火墙拦截统计（事件环形 + 规则分布）。
+func (a *App) FirewallStats() map[string]any {
+	rt := a.runtime(provider.WorkBuddy)
+	if rt == nil || rt.Upstream == nil {
+		return map[string]any{"enabled": false, "total": 0, "today": 0, "events": []any{}, "rules": []any{}}
+	}
+	api, ok := rt.Upstream.(interface {
+		FirewallEvents() []upstream.FirewallEvent
+		FirewallEnabled() bool
+	})
+	if !ok {
+		return map[string]any{"enabled": false, "total": 0, "today": 0, "events": []any{}, "rules": []any{}}
+	}
+	events := api.FirewallEvents()
+	today := time.Now().Format("2006-01-02")
+	todayN := 0
+	ruleCount := map[string]int64{}
+	// 新→旧输出
+	out := make([]upstream.FirewallEvent, 0, len(events))
+	for i := len(events) - 1; i >= 0; i-- {
+		e := events[i]
+		ruleCount[e.Rule]++
+		if time.Unix(e.At, 0).Format("2006-01-02") == today {
+			todayN++
+		}
+		out = append(out, e)
+	}
+	type rc struct {
+		Rule  string `json:"rule"`
+		Count int64  `json:"count"`
+	}
+	rules := make([]rc, 0, len(ruleCount))
+	for r, n := range ruleCount {
+		rules = append(rules, rc{Rule: r, Count: n})
+	}
+	sort.Slice(rules, func(i, j int) bool { return rules[i].Count > rules[j].Count })
+	return map[string]any{
+		"enabled": api.FirewallEnabled(),
+		"total":   len(events),
+		"today":   todayN,
+		"events":  out,
+		"rules":   rules,
+	}
+}
+
 // UsageStatsResult 用量统计聚合。
 type UsageStatsResult struct {
 	Days      int              `json:"days"`
@@ -1494,6 +1539,10 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	// 任务动态流：旅行巡检/活跃上报的实时逐账号反馈（面板轮询）。
 	inner.HandleFunc("GET /api/tasks", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, a.TaskFeed())
+	})
+	// 内容防火墙：拦截事件与统计（面板「防火墙」页）。
+	inner.HandleFunc("GET /api/firewall/stats", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, a.FirewallStats())
 	})
 	// 用量统计：官方请求用量（积分消耗）× 账号/模型/日 聚合 + 请求日志 token 统计。
 	inner.HandleFunc("GET /api/usage/stats", func(w http.ResponseWriter, r *http.Request) {

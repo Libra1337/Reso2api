@@ -12,6 +12,7 @@ import {
   LogOut,
   Palette,
   PawPrint,
+  ShieldAlert,
   ShieldCheck,
   User,
 } from "lucide-react";
@@ -33,6 +34,7 @@ const navItems = [
   { to: "/admin/limits", label: "模型限流", icon: Gauge },
   { to: "/admin/tasks", label: "成长任务", icon: ListTodo },
   { to: "/admin/usage", label: "用量统计", icon: BarChart3 },
+  { to: "/admin/firewall", label: "防火墙", icon: ShieldAlert },
   { to: "/admin/logs", label: "运行日志", icon: ClipboardList },
 ];
 
@@ -45,6 +47,7 @@ const pageTitles: Record<string, string> = {
   "/admin/limits": "模型限流",
   "/admin/tasks": "成长任务",
   "/admin/usage": "用量统计",
+  "/admin/firewall": "防火墙",
   "/admin/logs": "运行日志",
 };
 

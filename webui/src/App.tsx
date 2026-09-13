@@ -8,6 +8,7 @@ import ApiPage from "@/pages/ApiPage";
 import RequestLogsPage from "@/pages/RequestLogsPage";
 import LimitsPage from "@/pages/LimitsPage";
 import TasksPage from "@/pages/TasksPage";
+import FirewallPage from "@/pages/FirewallPage";
 import UsagePage from "@/pages/UsagePage";
 import LogsPage from "@/pages/LogsPage";
 
@@ -36,6 +37,7 @@ export default function App() {
           <Route path="limits" element={<LimitsPage />} />
           <Route path="tasks" element={<TasksPage />} />
           <Route path="usage" element={<UsagePage />} />
+          <Route path="firewall" element={<FirewallPage />} />
           <Route path="logs" element={<LogsPage />} />
         </Route>
         <Route path="*" element={<NotFoundPage />} />

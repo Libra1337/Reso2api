@@ -86,6 +86,9 @@ export const api = {
   travelClaimAll: () =>
     request<import("@/types").SimpleResult>("/travel/claim_all", {}),
 
+  firewallStats: () =>
+    request<import("@/types").FirewallStatsResult>("/firewall/stats"),
+
   usageStats: (days = 31, force = false) =>
     request<import("@/types").UsageStatsResult>(
       `/usage/stats?days=${days}${force ? "&refresh=1" : ""}`,

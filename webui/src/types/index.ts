@@ -266,3 +266,19 @@ export interface UsageStatsResult {
   expiring: UsageExpiringRow[];
   errors?: string[];
 }
+
+export interface FirewallEvent {
+  at: number;
+  rule: string;
+  uid?: string;
+  model?: string;
+  snippet?: string;
+}
+
+export interface FirewallStatsResult {
+  enabled: boolean;
+  total: number;
+  today: number;
+  events: FirewallEvent[];
+  rules: { rule: string; count: number }[];
+}

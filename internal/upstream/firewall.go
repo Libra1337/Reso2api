@@ -25,6 +25,9 @@ package upstream
 import (
 	"regexp"
 	"strings"
+	"time"
+
+	"wild-work/internal/auth"
 )
 
 // firewallRule 单条高危规则。
@@ -139,4 +142,59 @@ func extractMessageText(body []byte) string {
 func FirewallHitResponse(rule string) []byte {
 	return []byte(`{"error":{"message":"请求内容命中网关内容防火墙规则 [` + rule +
 		`]，已被拦截：该类内容违反大模型平台使用政策，会导致上游账号被永久封禁。请修改后重试。","type":"content_firewall","code":"gateway_firewall"}}`)
+}
+
+// FirewallEvent 一次防火墙拦截记录（内存环形，面板展示用）。
+type FirewallEvent struct {
+	At      int64  `json:"at"` // Unix 秒
+	Rule    string `json:"rule"`
+	UID     string `json:"uid,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Snippet string `json:"snippet,omitempty"` // 命中内容摘要（前 80 字符，脱敏展示）
+}
+
+const firewallEventCap = 500
+
+// recordFirewallHit 记录一次拦截（环形截断）。
+func (c *Client) recordFirewallHit(a *auth.Auth, rule, model string, prepared []byte) {
+	snippet := extractMessageText(prepared)
+	snippet = strings.ReplaceAll(snippet, "\n", " ")
+	if r := []rune(snippet); len(r) > 80 {
+		snippet = string(r[:80]) + "…"
+	}
+	uid := ""
+	if a != nil {
+		uid = a.UID
+	}
+	c.fwMu.Lock()
+	defer c.fwMu.Unlock()
+	c.fwHits = append(c.fwHits, FirewallEvent{
+		At: time.Now().Unix(), Rule: rule, UID: uid, Model: model, Snippet: snippet,
+	})
+	if len(c.fwHits) > firewallEventCap {
+		c.fwHits = c.fwHits[len(c.fwHits)-firewallEventCap:]
+	}
+}
+
+// FirewallEvents 返回命中事件（旧→新）副本。
+func (c *Client) FirewallEvents() []FirewallEvent {
+	c.fwMu.Lock()
+	defer c.fwMu.Unlock()
+	out := make([]FirewallEvent, len(c.fwHits))
+	copy(out, c.fwHits)
+	return out
+}
+
+// FirewallEnabled 当前防火墙是否启用。
+func (c *Client) FirewallEnabled() bool { return c.ContentFirewall }
+
+// extractModel 从请求体提取模型名（事件展示用）。
+func extractModel(body []byte) string {
+	var obj struct {
+		Model string `json:"model"`
+	}
+	if jsonUnmarshal(body, &obj) != nil {
+		return ""
+	}
+	return obj.Model
 }
