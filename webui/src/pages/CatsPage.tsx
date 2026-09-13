@@ -272,9 +272,9 @@ export default function CatsPage() {
   const [data, setData] = useState<TravelStatusResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [actionBusy, setActionBusy] = useState<"travel" | "activity" | null>(
-    null,
-  );
+  const [actionBusy, setActionBusy] = useState<
+    "travel" | "activity" | "claim" | null
+  >(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [tasks, setTasks] = useState<TaskEvent[]>([]);
   const [travelRunning, setTravelRunning] = useState(false);
@@ -596,6 +596,7 @@ export default function CatsPage() {
               title: "到站待领奖",
               desc: arrived.length ? `共 ${claimable} 积分待领` : "",
               list: arrived,
+              action: "claim" as const,
             },
             {
               key: "traveling",
@@ -657,6 +658,22 @@ export default function CatsPage() {
                         <Send className="mr-1 size-3" />
                       )}
                       一键上报并领养
+                    </Button>
+                  )}
+                  {g.action === "claim" && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-6"
+                      disabled={actionBusy !== null}
+                      onClick={() => void runAction("claim")}
+                    >
+                      {actionBusy === "claim" ? (
+                        <LoaderCircle className="mr-1 size-3 animate-spin" />
+                      ) : (
+                        <Gift className="mr-1 size-3" />
+                      )}
+                      领取全部奖励
                     </Button>
                   )}
                 </div>

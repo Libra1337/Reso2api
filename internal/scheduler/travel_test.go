@@ -135,3 +135,32 @@ func TestTravelNoCapabilityNoop(t *testing.T) {
 	s.RunTravelNow()
 	s.RunActivityNow()
 }
+
+// 一键领奖：只对到站账号领奖（idle/无猫零动作），领后刷新余额。
+func TestRunClaimsNowOnlyArrived(t *testing.T) {
+	var claimed map[string]any
+	var statusCalls int64
+	s, _ := travelTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/buddy/info"):
+			envelope(w, `{"buddy":{"id":1,"name":"cat"}}`)
+		case strings.HasSuffix(r.URL.Path, "/travel/status"):
+			atomic.AddInt64(&statusCalls, 1)
+			envelope(w, `{"state":"arrived","record_id":77,"reward_credit":9}`)
+		case strings.HasSuffix(r.URL.Path, "/travel/claim"):
+			_ = json.NewDecoder(r.Body).Decode(&claimed)
+			envelope(w, `{"reward_credit":9}`)
+		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
+			envelope(w, `{"Response":{"Data":{"Accounts":[{"PackageName":"p","CapacityRemain":100}]}}}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	})
+	s.RunClaimsNow()
+	if claimed["record_id"] != float64(77) {
+		t.Fatalf("claim record_id=%v want 77", claimed["record_id"])
+	}
+	if n := atomic.LoadInt64(&statusCalls); n != 1 {
+		t.Fatalf("status calls=%d want 1", n)
+	}
+}

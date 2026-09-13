@@ -443,3 +443,56 @@ func (s *Scheduler) activityCount() int {
 	}
 	return 5
 }
+
+// RunClaimsNow 立即领取全部到站奖励（幂等：只对 arrived 状态动作，其余跳过）。
+// 到站猫当日不能再派出（旅行每天 1 趟），领奖即当日终点——不必等下一轮巡检。
+func (s *Scheduler) RunClaimsNow() {
+	api := s.travelCap()
+	if api == nil {
+		return
+	}
+	if !s.travelMu.TryLock() {
+		log.Printf("claim platform=%s: busy, skip (travel running)", s.cfg.Name)
+		return
+	}
+	defer s.travelMu.Unlock()
+	s.emitTask("travel", "", "领奖开始（仅到站账号）")
+	var claimed, credits int64
+	first := true
+	for _, st := range s.cfg.Pool.List() {
+		if st.Disabled {
+			continue
+		}
+		a := s.cfg.Pool.AuthByUID(st.UID)
+		if a == nil || a.RefreshToken == "" {
+			continue
+		}
+		buddy, err := api.BuddyInfo(a)
+		if err != nil || buddy == nil {
+			continue
+		}
+		ts, err := api.TravelStatus(a)
+		if err != nil {
+			continue
+		}
+		if ts.State != travelStateArrived || ts.RecordID == 0 {
+			continue
+		}
+		if !first {
+			time.Sleep(travelAccountDelay)
+		}
+		first = false
+		reward, err := api.TravelClaim(a, ts.RecordID)
+		if err != nil {
+			log.Printf("claim platform=%s uid=%s: claim record=%d: %v", s.cfg.Name, a.UID, ts.RecordID, err)
+			s.emitTask("travel", a.UID, fmt.Sprintf("领奖失败：%v", err))
+			continue
+		}
+		claimed++
+		credits += reward
+		s.bumpTravel(func(t *travelCountersSnapshot) { t.claims++; t.claimCredits += reward })
+		s.refreshCredits(a, "claim")
+		s.emitTask("travel", a.UID, fmt.Sprintf("领奖 +%d 积分", reward))
+	}
+	s.emitTask("travel", "", fmt.Sprintf("领奖完成：%d 次 +%d 积分", claimed, credits))
+}

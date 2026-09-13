@@ -83,6 +83,9 @@ export const api = {
   travelRunAll: () =>
     request<import("@/types").SimpleResult>("/travel/run_all", {}),
 
+  travelClaimAll: () =>
+    request<import("@/types").SimpleResult>("/travel/claim_all", {}),
+
   travelStatus: (force = false) =>
     request<import("@/types").TravelStatusResult>(
       `/travel/status${force ? "?refresh=1" : ""}`,

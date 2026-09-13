@@ -789,6 +789,17 @@ func (a *App) RunTravelAll() {
 	}
 }
 
+// RunClaimsAll 异步触发全部平台的到站领奖（无能力平台自动跳过）。
+func (a *App) RunClaimsAll() {
+	for _, rt := range a.runtimes {
+		if rt == nil || rt.Scheduler == nil {
+			continue
+		}
+		sch := rt.Scheduler
+		a.safeGo(sch.RunClaimsNow)
+	}
+}
+
 // RunActivityAll 异步触发全部平台的活跃上报。
 func (a *App) RunActivityAll() {
 	for _, rt := range a.runtimes {
@@ -1242,6 +1253,11 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	})
 	inner.HandleFunc("POST /api/activity/run_all", func(w http.ResponseWriter, r *http.Request) {
 		a.RunActivityAll()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
+	})
+	// 一键领奖：只对到站账号领奖（幂等，比全量巡检轻）。
+	inner.HandleFunc("POST /api/travel/claim_all", func(w http.ResponseWriter, r *http.Request) {
+		a.RunClaimsAll()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 	})
 	// 猫猫乐园聚合状态：全部账号的猫档案 + 旅行进度 + 连登（60s 缓存，
