@@ -86,6 +86,20 @@ export const api = {
   travelClaimAll: () =>
     request<import("@/types").SimpleResult>("/travel/claim_all", {}),
 
+  tasksList: (uid?: string) =>
+    request<import("@/types").TasksListResult>(
+      `/tasks/list${uid ? `?uid=${encodeURIComponent(uid)}` : ""}`,
+    ),
+
+  taskAuto: (uid: string, taskCode: string) =>
+    request<import("@/types").TaskAutoResult>("/tasks/auto", {
+      uid,
+      task_code: taskCode,
+    }),
+
+  taskAutoAll: (uid: string) =>
+    request<import("@/types").SimpleResult>("/tasks/auto_all", { uid }),
+
   travelStatus: (force = false) =>
     request<import("@/types").TravelStatusResult>(
       `/travel/status${force ? "?refresh=1" : ""}`,

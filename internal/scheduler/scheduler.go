@@ -36,6 +36,7 @@ type Config struct {
 	TravelInterval      time.Duration
 	TravelHours         []int // 猫猫旅行时点（默认 [9,21]：一趟派出 + 一趟领奖闭环），仅 workbuddy
 	ActivityHours       []int // 活跃上报时点（默认 [10]），仅 workbuddy
+	BlackcatHours       []int // 夜猫子补足时点（默认 [23]，须在 23:00–08:00 窗口内）
 	ActivityReportCount int   // 每号每次上报条数（默认 5：领猫对话量门槛）
 	// TravelDisabled/ActivityDisabled 显式关闭对应排程（traework/qoder 平台置真）。
 	TravelDisabled   bool
@@ -80,6 +81,9 @@ func New(cfg Config) *Scheduler {
 	}
 	if !cfg.ActivityDisabled && len(cfg.ActivityHours) == 0 {
 		cfg.ActivityHours = []int{10}
+	}
+	if len(cfg.BlackcatHours) == 0 {
+		cfg.BlackcatHours = []int{23}
 	}
 	if cfg.ActivityReportCount <= 0 {
 		cfg.ActivityReportCount = 5
@@ -242,10 +246,11 @@ const (
 	taskKeepalive
 	taskTravel
 	taskActivity
+	taskBlackcat
 )
 
 // scheduleAll 返回全部任务时点（分钟），travel/activity 关闭时为空。
-func (s *Scheduler) scheduleAll() (checkin, keepalive, travel, activity []int) {
+func (s *Scheduler) scheduleAll() (checkin, keepalive, travel, activity, blackcat []int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	checkin = append([]int{}, s.cfg.CheckinMinutes...)
@@ -256,6 +261,7 @@ func (s *Scheduler) scheduleAll() (checkin, keepalive, travel, activity []int) {
 	if !s.cfg.ActivityDisabled {
 		activity = append([]int{}, s.cfg.ActivityHours...)
 	}
+	blackcat = append([]int{}, s.cfg.BlackcatHours...)
 	return
 }
 
@@ -265,7 +271,7 @@ func (s *Scheduler) scheduleAll() (checkin, keepalive, travel, activity []int) {
 func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		now := time.Now()
-		ch, kh, th, ah := s.scheduleAll()
+		ch, kh, th, ah, bh := s.scheduleAll()
 		type slot struct {
 			at   time.Time
 			kind taskKind
@@ -288,6 +294,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 		}
 		for _, m := range ah {
 			slots = append(slots, slot{nextFireMinutes(now, []int{m}), taskActivity, m})
+		}
+		for _, m := range bh {
+			slots = append(slots, slot{nextFireMinutes(now, []int{m}), taskBlackcat, m})
 		}
 		var next *slot
 		for i := range slots {
@@ -321,6 +330,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 				s.RunTravelNow()
 			case taskActivity:
 				s.RunActivityNow()
+			case taskBlackcat:
+				s.RunBlackcatNow()
 			}
 		}
 	}
@@ -356,6 +367,7 @@ type CheckinResult struct {
 // RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻。
 // 冷却中的账号也参与（签到就是为了解冻它们）；禁用的跳过。
 func (s *Scheduler) RunCheckinNow() {
+	defer s.RunStreakBonusNow() // 签到后跑连登管家：补签/礼包/档位兑换/抽奖（幂等）
 	name := s.name()
 	log.Printf("checkin batch start platform=%s accounts=%d", name, len(s.cfg.Pool.List()))
 	for _, st := range s.cfg.Pool.List() {

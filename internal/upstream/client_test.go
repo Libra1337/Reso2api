@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"wild-work/internal/auth"

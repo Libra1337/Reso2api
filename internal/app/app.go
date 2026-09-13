@@ -1260,6 +1260,62 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		a.RunClaimsAll()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 	})
+	// 成长任务：列表 / 单任务执行 / 单账号一键全做。
+	inner.HandleFunc("GET /api/tasks/list", func(w http.ResponseWriter, r *http.Request) {
+		uid := r.URL.Query().Get("uid")
+		api, rt := a.workbuddyTaskAPI()
+		if api == nil {
+			apiError(w, http.StatusBadRequest, "workbuddy 平台未启用")
+			return
+		}
+		if uid == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"actions": AutoActionsMeta()})
+			return
+		}
+		acct := rt.Pool.AuthByUID(uid)
+		if acct == nil {
+			apiError(w, http.StatusBadRequest, "unknown account")
+			return
+		}
+		tasks, err := api.ListTasks(acct)
+		if err != nil {
+			apiError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks, "actions": AutoActionsMeta()})
+	})
+	inner.HandleFunc("POST /api/tasks/auto", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UID      string `json:"uid"`
+			TaskCode string `json:"task_code"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.UID == "" || req.TaskCode == "" {
+			apiError(w, http.StatusBadRequest, "uid 和 task_code 必填")
+			return
+		}
+		resp, err := a.RunTaskAuto(req.UID, req.TaskCode)
+		if err != nil {
+			apiError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	})
+	inner.HandleFunc("POST /api/tasks/auto_all", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UID string `json:"uid"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.UID == "" {
+			apiError(w, http.StatusBadRequest, "uid 必填")
+			return
+		}
+		if err := a.RunTaskAutoAll(req.UID); err != nil {
+			apiError(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
+	})
 	// 猫猫乐园聚合状态：全部账号的猫档案 + 旅行进度 + 连登（60s 缓存，
 	// ?refresh=1 强制刷新）。并发拉取，面板单用户场景足够。
 	inner.HandleFunc("GET /api/travel/status", func(w http.ResponseWriter, r *http.Request) {

@@ -7,6 +7,7 @@ import AccountsPage from "@/pages/AccountsPage";
 import ApiPage from "@/pages/ApiPage";
 import RequestLogsPage from "@/pages/RequestLogsPage";
 import LimitsPage from "@/pages/LimitsPage";
+import TasksPage from "@/pages/TasksPage";
 import LogsPage from "@/pages/LogsPage";
 
 function NotFoundPage() {
@@ -32,6 +33,7 @@ export default function App() {
           <Route path="keys" element={<ApiPage />} />
           <Route path="reqlog" element={<RequestLogsPage />} />
           <Route path="limits" element={<LimitsPage />} />
+          <Route path="tasks" element={<TasksPage />} />
           <Route path="logs" element={<LogsPage />} />
         </Route>
         <Route path="*" element={<NotFoundPage />} />

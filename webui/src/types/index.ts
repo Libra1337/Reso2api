@@ -202,3 +202,42 @@ export interface LimitsResult {
   models: ModelLimitItem[];
   account_cooling: AccountCoolItem[];
 }
+
+export interface GrowthTask {
+  task_code: string;
+  title?: string;
+  description?: string;
+  task_desc?: string;
+  credit?: number;
+  energy?: number;
+  task_type?: string;
+  locked?: boolean;
+  target: number;
+  current: number;
+  accept_status?: string;
+  status?: string;
+  claimable?: boolean;
+  claimed?: boolean;
+}
+
+export interface TaskActionMeta {
+  task_code: string;
+  desc: string;
+  attempt?: boolean;
+}
+
+export interface TasksListResult {
+  tasks?: GrowthTask[];
+  actions: TaskActionMeta[];
+}
+
+export interface TaskAutoResult {
+  ok: boolean;
+  skipped?: boolean;
+  message: string;
+  progress_before?: string;
+  progress_after?: string;
+  claimed?: boolean;
+  credit?: number;
+  energy?: number;
+}

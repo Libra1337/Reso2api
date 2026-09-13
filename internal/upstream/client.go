@@ -99,6 +99,9 @@ type Client struct {
 	BillingBaseCN   string
 	ChatBaseGlobal  string
 	BillingBaseGlob string
+	// WebBaseCN 成长中心 Web 域（任务领奖 / Web 端事件上报用，
+	// 与 billing 域 codebuddy.cn 不同：领奖端点在 workbuddy.cn）。
+	WebBaseCN string
 
 	// SanitizeFingerprints 开启后出站消息内容做指纹脱敏（sanitize.go）。
 	SanitizeFingerprints bool
@@ -180,6 +183,7 @@ func New() *Client {
 		BillingHTTP:     &http.Client{Timeout: 30 * time.Second, Transport: tr},
 		ChatBaseCN:      "https://copilot.tencent.com",
 		BillingBaseCN:   "https://www.codebuddy.cn",
+		WebBaseCN:       "https://www.workbuddy.cn",
 		ChatBaseGlobal:  "https://www.workbuddy.ai",
 		BillingBaseGlob: "https://www.workbuddy.ai",
 	}
@@ -191,6 +195,14 @@ func (c *Client) streamClient() *http.Client {
 		return c.StreamHTTP
 	}
 	return c.HTTP
+}
+
+// webBase 成长中心 Web 域（默认 www.workbuddy.cn）。
+func (c *Client) webBase() string {
+	if c.WebBaseCN != "" {
+		return c.WebBaseCN
+	}
+	return "https://www.workbuddy.cn"
 }
 
 // billingClient 返回账单接口用的 HTTP 客户端。

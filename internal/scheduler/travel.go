@@ -167,9 +167,9 @@ func (s *Scheduler) travelCounters() travelCountersSnapshot {
 }
 
 type travelCountersSnapshot struct {
-	adopts      int
-	claims      int
-	departs     int
+	adopts       int
+	claims       int
+	departs      int
 	claimCredits int64
 }
 

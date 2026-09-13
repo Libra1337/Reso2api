@@ -82,6 +82,7 @@ type HeaderSnapshot struct {
 	EnterpriseID string
 	Domain       string
 	Region       string
+	Nickname     string
 }
 
 // Snapshot 返回 HeaderSnapshot（持读锁）。
@@ -95,6 +96,7 @@ func (a *Auth) Snapshot() HeaderSnapshot {
 		EnterpriseID: a.EnterpriseID,
 		Domain:       a.Domain,
 		Region:       RegionOf(a.Domain),
+		Nickname:     a.Nickname,
 	}
 }
 

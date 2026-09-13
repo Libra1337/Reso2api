@@ -75,6 +75,42 @@ type chatRequestEvent struct {
 	UserID                string `json:"userId"`
 }
 
+// ReportChatActivityModel 同 ReportChatActivity，但可指定上报携带的模型：
+// 「体验某模型」类成长任务（Model_chat_GLM5.2 / black_cat）判据校验模型字段。
+func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, modelID, modelName string) error {
+	if modelID == "" {
+		modelID = "deepseek-v4-flash"
+	}
+	if modelName == "" {
+		modelName = modelID
+	}
+	now := time.Now().UnixMilli()
+	ev := chatRequestEvent{
+		EventCode:        "chat_request_send",
+		Timestamp:        now,
+		Mode:             "craft",
+		ConversationID:   conversationID,
+		RequestID:        conversationID,
+		InputLength:      12,
+		RequestModelID:   modelID,
+		RequestModelName: modelName,
+		MentionContexts:  []any{},
+		KnowledgeID:      []any{},
+		KnowledgeName:    []any{},
+		PresentAt:        now,
+		RootRequestID:    conversationID,
+		AgentName:        "default",
+		AgentType:        "conversation",
+		UserID:           a.UID,
+	}
+	raw, err := json.Marshal([]chatRequestEvent{ev})
+	if err != nil {
+		return err
+	}
+	_, err = c.billingJSON(a, http.MethodPost, reportPath, json.RawMessage(raw))
+	return err
+}
+
 // ReportChatActivity 向上游发送一条对话活跃上报（chat_request_send）。
 // conversationID 由调用方生成（如 wb2api-<ms>），无需真实会话——服务端不校验一致性。
 // requestID 为本轮请求独立标识；空时回落 conversationID。
