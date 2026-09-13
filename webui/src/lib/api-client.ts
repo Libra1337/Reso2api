@@ -86,6 +86,11 @@ export const api = {
   travelClaimAll: () =>
     request<import("@/types").SimpleResult>("/travel/claim_all", {}),
 
+  usageStats: (days = 31, force = false) =>
+    request<import("@/types").UsageStatsResult>(
+      `/usage/stats?days=${days}${force ? "&refresh=1" : ""}`,
+    ),
+
   tasksList: (uid?: string) =>
     request<import("@/types").TasksListResult>(
       `/tasks/list${uid ? `?uid=${encodeURIComponent(uid)}` : ""}`,

@@ -1,6 +1,7 @@
 import { NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
 import {
   Activity,
+  BarChart3,
   Check,
   ChevronDown,
   ClipboardList,
@@ -31,6 +32,7 @@ const navItems = [
   { to: "/admin/reqlog", label: "请求日志", icon: Activity },
   { to: "/admin/limits", label: "模型限流", icon: Gauge },
   { to: "/admin/tasks", label: "成长任务", icon: ListTodo },
+  { to: "/admin/usage", label: "用量统计", icon: BarChart3 },
   { to: "/admin/logs", label: "运行日志", icon: ClipboardList },
 ];
 
@@ -42,6 +44,7 @@ const pageTitles: Record<string, string> = {
   "/admin/reqlog": "请求日志",
   "/admin/limits": "模型限流",
   "/admin/tasks": "成长任务",
+  "/admin/usage": "用量统计",
   "/admin/logs": "运行日志",
 };
 

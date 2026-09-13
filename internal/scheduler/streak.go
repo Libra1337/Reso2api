@@ -8,6 +8,7 @@ package scheduler
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 
 // streakAPI 连登管家所需的 growth 能力（仅 workbuddy 上游实现）。
 type streakAPI interface {
+	BuddyQuota(a *auth.Auth) (affordable, maxOpen int, err error)
+	BuddyOpen(a *auth.Auth, count int) (string, error)
 	ClaimGift(a *auth.Auth) (int64, error)
 	ClaimCompensation(a *auth.Auth) (int64, error)
 	GrowthStreakFull(a *auth.Auth) (*upstream.StreakFull, error)
@@ -97,6 +100,17 @@ func (s *Scheduler) streakBonusAccount(api streakAPI, a *auth.Auth) {
 	}
 	if chances > 0 {
 		log.Printf("streak-bonus %s: 抽奖完成 %d 次", a.UID, chances)
+	}
+	// Buddy 盲盒：能量没有其它消耗出口，攒够就抽（自动signin 同款口径）。
+	if affordable, maxOpen, err := api.BuddyQuota(a); err == nil && affordable > 0 {
+		count := affordable
+		if count > maxOpen {
+			count = maxOpen
+		}
+		if name, oerr := api.BuddyOpen(a, count); oerr == nil {
+			log.Printf("streak-bonus %s: 🎁 Buddy 盲盒 ×%d（%s）", a.UID, count, name)
+			s.emitTask("activity", a.UID, fmt.Sprintf("Buddy 盲盒 ×%d（%s）", count, name))
+		}
 	}
 }
 

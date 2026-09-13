@@ -242,3 +242,27 @@ export interface TaskAutoResult {
   credit?: number;
   energy?: number;
 }
+
+export interface UsageAggRow {
+  key: string;
+  credit: number;
+  requests: number;
+}
+
+export interface UsageExpiringRow {
+  nickname: string;
+  name: string;
+  remain: number;
+  expire_at: string;
+}
+
+export interface UsageStatsResult {
+  days: number;
+  fetched_at: number;
+  daily: UsageAggRow[];
+  models: UsageAggRow[];
+  accounts: UsageAggRow[];
+  tokens: UsageAggRow[];
+  expiring: UsageExpiringRow[];
+  errors?: string[];
+}

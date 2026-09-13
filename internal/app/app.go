@@ -90,6 +90,10 @@ type App struct {
 	travelFetched  time.Time
 	travelFetching bool
 
+	usageMu      sync.Mutex // 用量统计缓存锁
+	usageCache   *UsageStatsResult
+	usageFetched time.Time
+
 	newAccMu  sync.Mutex      // 新号检测锁
 	knownUIDs map[string]bool // 已知 workbuddy 账号基线（导入 diff 用）
 
@@ -611,6 +615,159 @@ func (a *App) TaskFeed() map[string]any {
 		"travel_running":   a.travelRuns > 0,
 		"activity_running": a.activityRuns > 0,
 	}
+}
+
+// UsageStatsResult 用量统计聚合。
+type UsageStatsResult struct {
+	Days      int              `json:"days"`
+	FetchedAt int64            `json:"fetched_at"`
+	Daily     []map[string]any `json:"daily"`    // [{date, credit, requests}]
+	Models    []map[string]any `json:"models"`   // [{model, credit, requests}]
+	Accounts  []map[string]any `json:"accounts"` // [{nickname, credit, requests}]
+	Tokens    []map[string]any `json:"tokens"`   // 请求日志 token 聚合 [{model, tokens, requests}]
+	Expiring  []map[string]any `json:"expiring"` // ≤7 天到期的积分包 [{nickname, name, remain, expire_at}]
+	Errors    []string         `json:"errors,omitempty"`
+}
+
+const usageStatsTTL = 10 * time.Minute
+
+// UsageStats 聚合官方请求用量（积分消耗）+ 本地请求日志 token 统计 + 积分到期提醒。
+func (a *App) UsageStats(days int, force bool) *UsageStatsResult {
+	a.usageMu.Lock()
+	if !force && a.usageCache != nil && time.Since(a.usageFetched) < usageStatsTTL && a.usageCache.Days == days {
+		out := a.usageCache
+		a.usageMu.Unlock()
+		return out
+	}
+	a.usageMu.Unlock()
+
+	rt := a.runtime(provider.WorkBuddy)
+	if rt == nil || rt.Pool == nil || rt.Upstream == nil {
+		return &UsageStatsResult{Days: days}
+	}
+	api, ok := rt.Upstream.(interface {
+		FetchRequestUsage(acct *auth.Auth, d int) ([]upstream.UsageRow, error)
+	})
+	if !ok {
+		return &UsageStatsResult{Days: days}
+	}
+	up, _ := rt.Upstream.(taskAPI)
+
+	type agg struct {
+		credit   float64
+		requests int64
+	}
+	dayAgg := map[string]*agg{}
+	modelAgg := map[string]*agg{}
+	acctAgg := map[string]*agg{}
+	var errs []string
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 3)
+	var expiring []map[string]any
+
+	for _, st := range rt.Pool.List() {
+		if st.Disabled {
+			continue
+		}
+		wg.Add(1)
+		go func(uid, nickname string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			acct := rt.Pool.AuthByUID(uid)
+			if acct == nil {
+				return
+			}
+			rows, err := api.FetchRequestUsage(acct, days)
+			if err != nil {
+				mu.Lock()
+				errs = append(errs, nickname+": "+err.Error())
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			aa := acctAgg[nickname]
+			if aa == nil {
+				aa = &agg{}
+				acctAgg[nickname] = aa
+			}
+			for _, r := range rows {
+				d := r.Time.Format("2006-01-02")
+				if dayAgg[d] == nil {
+					dayAgg[d] = &agg{}
+				}
+				dayAgg[d].credit += r.Credit
+				dayAgg[d].requests++
+				if modelAgg[r.Model] == nil {
+					modelAgg[r.Model] = &agg{}
+				}
+				modelAgg[r.Model].credit += r.Credit
+				modelAgg[r.Model].requests++
+				aa.credit += r.Credit
+				aa.requests++
+			}
+			mu.Unlock()
+			// 积分到期提醒（≤7 天）
+			if up != nil {
+				if _, items, err := rt.Upstream.UserResourceDetail(acct); err == nil {
+					deadline := time.Now().AddDate(0, 0, 7)
+					for _, it := range items {
+						if it.ExpireAt == "" {
+							continue
+						}
+						if t, err := time.ParseInLocation("2006-01-02 15:04:05", it.ExpireAt, time.Local); err == nil && t.After(time.Now()) && t.Before(deadline) && it.Remain > 0 {
+							mu.Lock()
+							expiring = append(expiring, map[string]any{
+								"nickname": nickname, "name": it.Name,
+								"remain": it.Remain, "expire_at": it.ExpireAt,
+							})
+							mu.Unlock()
+						}
+					}
+				}
+			}
+		}(st.UID, st.Nickname)
+	}
+	wg.Wait()
+
+	sortAgg := func(m map[string]*agg) []map[string]any {
+		out := make([]map[string]any, 0, len(m))
+		for k, v := range m {
+			out = append(out, map[string]any{"key": k, "credit": v.credit, "requests": v.requests})
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i]["credit"].(float64) > out[j]["credit"].(float64) })
+		return out
+	}
+	daily := sortAgg(dayAgg)
+	sort.Slice(daily, func(i, j int) bool {
+		return daily[i]["key"].(string) < daily[j]["key"].(string)
+	})
+
+	// token 统计：请求日志内存环（模型 → tokens/requests）
+	tokAgg := map[string]*agg{}
+	for _, l := range a.handler.RequestLogs() {
+		total := l.InTokens + l.OutTokens
+		if total > 0 {
+			if tokAgg[l.Model] == nil {
+				tokAgg[l.Model] = &agg{}
+			}
+			tokAgg[l.Model].credit += float64(total)
+			tokAgg[l.Model].requests++
+		}
+	}
+	tokens := sortAgg(tokAgg)
+
+	res := &UsageStatsResult{
+		Days: days, FetchedAt: time.Now().Unix(),
+		Daily: daily, Models: sortAgg(modelAgg), Accounts: sortAgg(acctAgg),
+		Tokens: tokens, Expiring: expiring, Errors: errs,
+	}
+	a.usageMu.Lock()
+	a.usageCache = res
+	a.usageFetched = time.Now()
+	a.usageMu.Unlock()
+	return res
 }
 
 // LimitsOverview 模型限流总览（面板「模型限流」页）。
@@ -1337,6 +1494,15 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	// 任务动态流：旅行巡检/活跃上报的实时逐账号反馈（面板轮询）。
 	inner.HandleFunc("GET /api/tasks", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, a.TaskFeed())
+	})
+	// 用量统计：官方请求用量（积分消耗）× 账号/模型/日 聚合 + 请求日志 token 统计。
+	inner.HandleFunc("GET /api/usage/stats", func(w http.ResponseWriter, r *http.Request) {
+		days := 31
+		if v := r.URL.Query().Get("days"); v == "7" {
+			days = 7
+		}
+		force := r.URL.Query().Get("refresh") == "1"
+		writeJSON(w, http.StatusOK, a.UsageStats(days, force))
 	})
 	// 模型限流总览：6004 模型级限额（哪些模型在哪些号上被限、何时重置）
 	// + 整号冷却明细（429/欠费/连续错误）。
