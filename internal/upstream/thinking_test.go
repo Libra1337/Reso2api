@@ -301,3 +301,28 @@ func TestInjectThinkingStringPreserved(t *testing.T) {
 		t.Errorf("stream 未强制: %s", out)
 	}
 }
+
+// stop 参数归一：字符串→数组（上游要 []string），空值删除，数组清洗空项。
+func TestNormalizeStop(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`{"model":"m","stop":"END","messages":[]}`, `"stop":["END"]`},
+		{`{"model":"m","stop":"","messages":[]}`, ``},
+		{`{"model":"m","stop":["a","","b"],"messages":[]}`, `"stop":["a","b"]`},
+		{`{"model":"m","stop":[],"messages":[]}`, ``},
+		{`{"model":"m","messages":[]}`, ``},
+	}
+	for _, c := range cases {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(c.in), &obj); err != nil {
+			t.Fatal(err)
+		}
+		normalizeStop(obj)
+		out, _ := json.Marshal(obj)
+		if c.want == "" && strings.Contains(string(out), `"stop"`) {
+			t.Errorf("in=%s want no stop, got %s", c.in, out)
+		}
+		if c.want != "" && !strings.Contains(string(out), c.want) {
+			t.Errorf("in=%s want %s, got %s", c.in, c.want, out)
+		}
+	}
+}

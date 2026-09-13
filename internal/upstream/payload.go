@@ -36,6 +36,7 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 	obj["stream"] = true
 	normalizeToolChoice(obj)
 	normalizeRoles(obj)
+	normalizeStop(obj)
 	// DeepSeek 思维链开关（见 thinking.go）：注入 thinking.type=enabled + 缺档补默认档。
 	// 先于 normalizeReasoningEffort 执行：补入的默认档也要走既有降级管线，
 	// 模型不支持默认档时自动落到 ≤ 默认档的最高支持档（不出站不合规档位）。
@@ -119,6 +120,36 @@ func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
 	if lowest != "" {
 		obj[key] = lowest
 		log.Printf("reasoning_effort floored model=%s %s -> %s", model, reqStr, lowest)
+	}
+}
+
+// normalizeStop 归一 stop 参数形态：部分客户端发字符串（stop:"..."），
+// 上游严格要求数组（Request.stop []string），字符串原样透传必 400 code=11101。
+// string → [string]；空数组/空字符串删除；[]string 原样。
+func normalizeStop(obj map[string]any) {
+	v, present := obj["stop"]
+	if !present {
+		return
+	}
+	switch sv := v.(type) {
+	case string:
+		if strings.TrimSpace(sv) == "" {
+			delete(obj, "stop")
+			return
+		}
+		obj["stop"] = []string{sv}
+	case []any:
+		out := make([]string, 0, len(sv))
+		for _, item := range sv {
+			if str, ok := item.(string); ok && strings.TrimSpace(str) != "" {
+				out = append(out, str)
+			}
+		}
+		if len(out) == 0 {
+			delete(obj, "stop")
+			return
+		}
+		obj["stop"] = out
 	}
 }
 

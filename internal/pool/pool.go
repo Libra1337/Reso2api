@@ -302,7 +302,10 @@ func (p *Pool) CooldownSoftForModel(uid string, resetAt time.Time, model, reason
 	if !ok {
 		return
 	}
-	if cap := time.Now().Add(2 * time.Hour); resetAt.After(cap) {
+	// 上游 6004 为按天重置的模型用量限额（实测文案"将在 <次日> 重置"）。
+	// cap 24h：既尊重上游重置墙钟（避免限期内反复重试打爆），又不至于
+	// 因上游文案时钟异常锁死超过一天。
+	if cap := time.Now().Add(24 * time.Hour); resetAt.After(cap) {
 		resetAt = cap
 	}
 	if e.modelCool == nil {
