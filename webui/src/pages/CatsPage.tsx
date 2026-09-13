@@ -310,13 +310,22 @@ export default function CatsPage() {
         setTasks(r.events ?? []);
         setTravelRunning(r.travel_running);
         setActivityRunning(r.activity_running);
-        const ends = (r.events ?? []).filter(
+        const endEvents = (r.events ?? []).filter(
           (e) => !e.uid && e.msg.includes("完成"),
-        ).length;
-        if (ends > seenEndRef.current && seenEndRef.current > 0) {
+        );
+        if (endEvents.length > seenEndRef.current && seenEndRef.current > 0) {
           void load(true); // 新一轮任务刚结束 → 立即刷新状态看结果
+          // 上报刚结束 → 自动接一轮旅行巡检（把刚领养的猫派出，新号一键走完全流程）
+          const last = endEvents[0];
+          if (last?.kind === "activity" && !r.travel_running) {
+            setNotice("活跃上报完成，自动开始旅行巡检（领养→派出）…");
+            void api
+              .travelRunAll()
+              .catch(() => {})
+              .finally(() => setTimeout(() => void load(true), 90_000));
+          }
         }
-        seenEndRef.current = ends;
+        seenEndRef.current = endEvents.length;
       } catch {
         /* ignore */
       }
@@ -520,10 +529,10 @@ export default function CatsPage() {
         {[
           {
             icon: "🐱",
-            title: "猫咪总数",
-            value: `${cats.length}/${accounts.length}`,
+            title: "已领养",
+            value: `${cats.length}/${accounts.filter((a) => !a.disabled).length}`,
             detail: noCat.length
-              ? `${noCat.length} 个号待领养`
+              ? `${noCat.length} 个新号待领养`
               : "全部领养完成",
           },
           {
@@ -534,9 +543,9 @@ export default function CatsPage() {
           },
           {
             icon: "🎁",
-            title: "可领奖",
+            title: "待领奖",
             value: `${arrived.length}`,
-            detail: arrived.length ? `待领 ${claimable} 积分` : "暂无到站",
+            detail: arrived.length ? `共 ${claimable} 积分` : "暂无到站",
           },
           {
             icon: "🔥",
@@ -564,7 +573,7 @@ export default function CatsPage() {
         ))}
       </div>
 
-      {/* 猫咪卡片网格 */}
+      {/* 猫咪卡片：按生命周期分组 */}
       {loading ? (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {Array.from({ length: 8 }).map((_, i) => (
@@ -579,10 +588,85 @@ export default function CatsPage() {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {accounts.map((a) => (
-            <CatCard key={a.uid} entry={a} />
-          ))}
+        <div className="space-y-5">
+          {[
+            {
+              key: "arrived",
+              emoji: "🎁",
+              title: "到站待领奖",
+              desc: arrived.length ? `共 ${claimable} 积分待领` : "",
+              list: arrived,
+            },
+            {
+              key: "traveling",
+              emoji: "🧳",
+              title: "旅行中",
+              desc: "",
+              list: traveling,
+            },
+            {
+              key: "idle",
+              emoji: "😴",
+              title: "空闲",
+              desc: "",
+              list: cats.filter((a) => a.travel?.state === "idle" || !a.travel),
+            },
+            {
+              key: "nocat",
+              emoji: "🥚",
+              title: "待领养（新账号）",
+              desc: "流程：活跃上报补 5 条对话 → 自动领养 +300 → 下一轮巡检派出",
+              list: noCat,
+              action: "activity" as const,
+            },
+            {
+              key: "disabled",
+              emoji: "🚫",
+              title: "已禁用",
+              desc: "",
+              list: accounts.filter((a) => a.disabled),
+            },
+          ]
+            .filter((g) => g.list.length > 0)
+            .map((g) => (
+              <section key={g.key} className="space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="flex items-center gap-1.5 text-sm font-semibold">
+                    <span>{g.emoji}</span>
+                    {g.title}
+                    <span className="rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-normal text-muted-foreground">
+                      {g.list.length}
+                    </span>
+                  </h3>
+                  {g.desc && (
+                    <span className="text-[11px] text-muted-foreground">
+                      {g.desc}
+                    </span>
+                  )}
+                  {g.action === "activity" && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-6"
+                      disabled={actionBusy !== null}
+                      onClick={() => void runAction("activity")}
+                    >
+                      {actionBusy === "activity" ? (
+                        <LoaderCircle className="mr-1 size-3 animate-spin" />
+                      ) : (
+                        <Send className="mr-1 size-3" />
+                      )}
+                      一键上报并领养
+                    </Button>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {g.list.map((a) => (
+                    <CatCard key={a.uid} entry={a} />
+                  ))}
+                </div>
+              </section>
+            ))}
         </div>
       )}
     </div>
