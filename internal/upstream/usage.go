@@ -20,9 +20,9 @@ import (
 )
 
 const (
-	usageURL       = "/billing/meter/get-user-request-usage"
-	usagePageSize  = 3000
-	usageMaxPages  = 100
+	usageURL      = "/billing/meter/get-user-request-usage"
+	usagePageSize = 3000
+	usageMaxPages = 100
 )
 
 // UsageRow 单次请求的扣分明细。
@@ -70,20 +70,24 @@ func (c *Client) FetchRequestUsage(a *auth.Auth, days int) ([]UsageRow, error) {
 			return nil, err
 		}
 		var resp struct {
-			Total int `json:"total"`
-			List  []struct {
-				RequestID   string  `json:"requestId"`
-				Credit      float64 `json:"credit"`
-				Model       string  `json:"model"`
-				Client      string  `json:"client"`
-				RequestTime string  `json:"requestTime"`
-			} `json:"list"`
+			Data struct {
+				Total int `json:"total"`
+				List  []struct {
+					RequestID   string  `json:"requestId"`
+					Credit      float64 `json:"credit"`
+					Model       string  `json:"model"`
+					Client      string  `json:"client"`
+					RequestTime string  `json:"requestTime"`
+					// 注意：响应还携带 inputTrunc（请求内容截断）等敏感字段，
+					// 此处结构体不声明即不解析、不透出（隐私红线）。
+				} `json:"data"`
+			} `json:"data"`
 		}
 		if err := json.Unmarshal(data, &resp); err != nil {
 			return nil, fmt.Errorf("usage parse: %w", err)
 		}
-		pageLen := len(resp.List)
-		for _, r := range resp.List {
+		pageLen := len(resp.Data.List)
+		for _, r := range resp.Data.List {
 			t, err := time.ParseInLocation("2006-01-02 15:04:05", r.RequestTime, time.Local)
 			if err != nil {
 				// 兼容毫秒时间戳形态
@@ -106,7 +110,7 @@ func (c *Client) FetchRequestUsage(a *auth.Auth, days int) ([]UsageRow, error) {
 				Model: r.Model, Client: r.Client, Time: t,
 			})
 		}
-		if pageLen < usagePageSize || len(rows) >= resp.Total {
+		if pageLen < usagePageSize || len(rows) >= resp.Data.Total {
 			break
 		}
 	}
