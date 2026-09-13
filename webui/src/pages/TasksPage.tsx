@@ -35,7 +35,7 @@ export default function TasksPage() {
 
   useEffect(() => {
     api
-      .state()
+      .getState()
       .then((s) => {
         const wb = (s.accounts ?? []).filter(
           (a: AccountLite) => a.group === "workbuddy",

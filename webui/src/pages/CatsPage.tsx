@@ -341,19 +341,22 @@ export default function CatsPage() {
     };
   }, [travelRunning, activityRunning, load]);
 
-  const runAction = async (kind: "travel" | "activity") => {
+  const runAction = async (kind: "travel" | "activity" | "claim") => {
     setActionBusy(kind);
     setNotice(null);
     try {
       if (kind === "travel") await api.travelRunAll();
+      else if (kind === "claim") await api.travelClaimAll();
       else await api.activityRunAll();
       setNotice(
         kind === "travel"
           ? "旅行巡检已启动，下方动态实时更新，完成后自动刷新"
-          : "活跃上报已启动，下方动态实时更新，完成后自动刷新",
+          : kind === "claim"
+            ? "领奖已启动，下方动态实时更新，完成后自动刷新"
+            : "活跃上报已启动，下方动态实时更新，完成后自动刷新",
       );
       // 兜底：动态流之外按预期时长再刷一次（防轮询错过完成事件）
-      setTimeout(() => void load(true), kind === "travel" ? 90_000 : 180_000);
+      setTimeout(() => void load(true), kind === "activity" ? 180_000 : 90_000);
     } finally {
       setActionBusy(null);
     }

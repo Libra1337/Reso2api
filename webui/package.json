@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc -b --noEmit && vite build",
     "build:embed": "vite build && node scripts/embed.mjs",
     "typecheck": "tsc -b --noEmit",
     "preview": "vite preview"

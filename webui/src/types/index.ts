@@ -181,6 +181,7 @@ export interface TaskFeedResult {
 
 export interface ModelCoolEntry {
   uid: string;
+  nickname?: string;
   until: string;
 }
 
