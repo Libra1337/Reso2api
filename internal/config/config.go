@@ -109,11 +109,12 @@ type Config struct {
 		CheckinTimes   []string `json:"checkin_times,omitempty"` // 新格式：["09:00","21:30"]
 		KeepaliveHours []int    `json:"keepalive_hours"`         // [22]
 		// 猫猫旅行 + 活跃上报（仅 workbuddy 平台生效；traework/qoder 调度器禁用）
-		TravelEnabled       *bool `json:"travel_enabled,omitempty"`        // 默认 true
-		TravelHours         []int `json:"travel_hours,omitempty"`          // 默认 [9,21]
-		ActivityEnabled     *bool `json:"activity_enabled,omitempty"`      // 默认 true
-		ActivityHours       []int `json:"activity_hours,omitempty"`        // 默认 [10]
-		ActivityReportCount int   `json:"activity_report_count,omitempty"` // 默认 5（领猫对话量门槛）
+		TravelIntervalMinutes int   `json:"travel_interval_minutes,omitempty"` // >0 = 滚动巡检间隔（如 120 两小时），忽略 travel_hours
+		TravelEnabled         *bool `json:"travel_enabled,omitempty"`          // 默认 true
+		TravelHours           []int `json:"travel_hours,omitempty"`            // 默认 [9,21]
+		ActivityEnabled       *bool `json:"activity_enabled,omitempty"`        // 默认 true
+		ActivityHours         []int `json:"activity_hours,omitempty"`          // 默认 [10]
+		ActivityReportCount   int   `json:"activity_report_count,omitempty"`   // 默认 5（领猫对话量门槛）
 	} `json:"schedule"`
 
 	Upstream struct {

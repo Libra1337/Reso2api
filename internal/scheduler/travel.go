@@ -299,6 +299,63 @@ func (s *Scheduler) markAdoptTried(uid string) {
 	s.adoptTried[uid] = travelDay(time.Now())
 }
 
+// RunActivityFor 对指定账号执行活跃上报（新号导入场景：只补新号门槛，
+// 不重复打扰老号——上游风控口径每号每天 1 次足够）。
+// 完成后由调用方决定是否接巡检（app 层新号闭环）。
+func (s *Scheduler) RunActivityFor(uids []string) {
+	api := s.travelCap()
+	if api == nil || len(uids) == 0 {
+		return
+	}
+	if !s.activityMu.TryLock() {
+		log.Printf("activity platform=%s: busy, skip targeted run", s.cfg.Name)
+		return
+	}
+	defer s.activityMu.Unlock()
+	count := s.activityCount()
+	s.emitTask("activity", "", fmt.Sprintf("新号上报开始（%d 个账号 × %d 条）", len(uids), count))
+	var reported int
+	for i, uid := range uids {
+		a := s.cfg.Pool.AuthByUID(uid)
+		if a == nil || a.AccessToken == "" {
+			continue
+		}
+		if i > 0 {
+			time.Sleep(activityAccountDelay)
+		}
+		cid := fmt.Sprintf("wb2api-%d", time.Now().UnixMilli())
+		ok := 0
+		for j := 1; j <= count; j++ {
+			if err := api.ReportChatActivity(a, cid, fmt.Sprintf("%s-r%d", cid, j)); err != nil {
+				log.Printf("activity platform=%s uid=%s: report %d/%d: %v", s.cfg.Name, uid, j, count, err)
+				break
+			}
+			ok++
+			if j < count {
+				time.Sleep(activityReportGap)
+			}
+		}
+		if ok < count {
+			s.emitTask("activity", uid, fmt.Sprintf("上报中断（%d/%d 条）", ok, count))
+			continue
+		}
+		reported++
+		if days, err := api.GrowthStreak(a); err == nil && days > 0 {
+			s.emitTask("activity", uid, fmt.Sprintf("上报完成，连登 %d 天", days))
+		} else {
+			s.emitTask("activity", uid, "上报完成")
+		}
+		if buddy, err := api.BuddyInfo(a); err == nil && buddy == nil {
+			before := s.travelCounters()
+			s.adoptBuddy(api, a, true)
+			if s.travelCounters().adopts > before.adopts {
+				s.emitTask("activity", uid, "领养成功 +300 积分")
+			}
+		}
+	}
+	s.emitTask("activity", "", fmt.Sprintf("新号上报完成：%d/%d 个号发满", reported, len(uids)))
+}
+
 // RunActivityNow 立即对池内所有可用账号执行对话活跃上报。
 // 每号 N 条（ActivityReportCount，默认 5）共用同一 conversationId、requestId 各自独立
 // ——领养猫的对话量门槛实测需 5 次。上报全发满后：streak 自检 + 无猫账号立即重试领养。

@@ -30,6 +30,10 @@ type Config struct {
 	// 调度器只做 keepalive；否则 New 的默认值会让每账号每天两次注定失败的签到。
 	SkipCheckin bool
 
+	// TravelInterval 旅行巡检滚动间隔（如 2h）：>0 时忽略 TravelHours 时点，
+	// 每隔该间隔巡检一轮——巡检是幂等状态机（到站领奖/空闲派出/其余 skip），
+	// 高频安全，猫一到站即领奖再派出，不必等时点。0 = 用 TravelHours 每日时点。
+	TravelInterval      time.Duration
 	TravelHours         []int // 猫猫旅行时点（默认 [9,21]：一趟派出 + 一趟领奖闭环），仅 workbuddy
 	ActivityHours       []int // 活跃上报时点（默认 [10]），仅 workbuddy
 	ActivityReportCount int   // 每号每次上报条数（默认 5：领猫对话量门槛）
@@ -223,6 +227,13 @@ func nextFireMinutes(now time.Time, minutes []int) time.Time {
 	return earliest
 }
 
+// travelInterval 读取旅行滚动间隔（0 = 时点模式）。
+func (s *Scheduler) travelInterval() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.TravelInterval
+}
+
 // taskKind 调度任务类型。
 type taskKind int
 
@@ -267,8 +278,13 @@ func (s *Scheduler) Run(ctx context.Context) {
 		for _, m := range kh {
 			slots = append(slots, slot{nextFireMinutes(now, []int{m}), taskKeepalive, m})
 		}
-		for _, m := range th {
-			slots = append(slots, slot{nextFireMinutes(now, []int{m}), taskTravel, m})
+		if s.travelInterval() > 0 {
+			// 滚动间隔模式：本轮结束后隔 interval 再巡检（忽略时点表）
+			slots = append(slots, slot{now.Add(s.travelInterval()), taskTravel, -1})
+		} else {
+			for _, m := range th {
+				slots = append(slots, slot{nextFireMinutes(now, []int{m}), taskTravel, m})
+			}
 		}
 		for _, m := range ah {
 			slots = append(slots, slot{nextFireMinutes(now, []int{m}), taskActivity, m})

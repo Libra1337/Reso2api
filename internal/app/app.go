@@ -90,6 +90,9 @@ type App struct {
 	travelFetched  time.Time
 	travelFetching bool
 
+	newAccMu  sync.Mutex      // 新号检测锁
+	knownUIDs map[string]bool // 已知 workbuddy 账号基线（导入 diff 用）
+
 	taskMu       sync.Mutex      // 任务动态流锁
 	taskEvents   []TaskEventView // 环形（最新在后）
 	travelRuns   int             // travel start 未配对 end 数（>0 = 运行中）
@@ -470,6 +473,43 @@ func (a *App) finishLogin() {
 	a.muLogin.Unlock()
 }
 
+// onNewWorkBuddyAccounts 检测新导入的 workbuddy 账号并自动触发
+// 「上报（仅新号）→ 领养 → 巡检派出」闭环。
+// 首次调用（启动对齐）只建立基线不触发；批量导入由 30s 防抖窗口合并成一轮。
+func (a *App) onNewWorkBuddyAccounts(rt *Runtime, auths []*auth.Auth) {
+	if rt.Scheduler == nil {
+		return
+	}
+	a.newAccMu.Lock()
+	if a.knownUIDs == nil {
+		a.knownUIDs = map[string]bool{}
+		for _, au := range auths {
+			a.knownUIDs[au.UID] = true
+		}
+		a.newAccMu.Unlock()
+		return // 启动基线：现有号不算"新导入"
+	}
+	var fresh []string
+	for _, au := range auths {
+		if !a.knownUIDs[au.UID] {
+			a.knownUIDs[au.UID] = true
+			fresh = append(fresh, au.UID)
+		}
+	}
+	a.newAccMu.Unlock()
+	if len(fresh) == 0 {
+		return
+	}
+	log.Printf("detected %d new account(s), auto onboarding in 30s: %v", len(fresh), fresh)
+	sch := rt.Scheduler
+	uids := fresh
+	a.safeGo(func() {
+		time.Sleep(30 * time.Second) // 防抖：多文件批量导入合并成一轮
+		sch.RunActivityFor(uids)     // 新号补对话门槛 + 领养
+		sch.RunTravelNow()           // 巡检：新号领养兜底/派出，老号幂等 skip
+	})
+}
+
 // ReloadAccounts 导出启动/外部触发用的账号池对齐入口。
 func (a *App) ReloadAccounts() { a.reloadAccounts() }
 
@@ -481,6 +521,7 @@ func (a *App) reloadAccounts() {
 			log.Printf("reload workbuddy accounts: %v", err)
 		} else {
 			rt.Pool.SyncToDir(auths)
+			a.onNewWorkBuddyAccounts(rt, auths)
 		}
 	}
 	if rt := a.runtime(provider.TraeWork); rt != nil && rt.Pool != nil {

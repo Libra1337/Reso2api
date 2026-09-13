@@ -146,6 +146,7 @@ func main() {
 		Pool: wbPool, Upstream: wbUp, Name: "workbuddy",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
 		TravelHours:         cfg.Schedule.TravelHours,
+		TravelInterval:      time.Duration(cfg.Schedule.TravelIntervalMinutes) * time.Minute,
 		ActivityHours:       cfg.Schedule.ActivityHours,
 		ActivityReportCount: cfg.Schedule.ActivityReportCount,
 		TravelDisabled:      !travelEnabled,
