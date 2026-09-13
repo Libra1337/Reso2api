@@ -110,6 +110,13 @@ func main() {
 	wbUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	wbUp.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
 	wbUp.ContentFirewall = cfg.Features.ContentFirewall == nil || *cfg.Features.ContentFirewall
+	wbUp.Judge = upstream.JudgeConfig{
+		Enabled:   cfg.Features.JudgeEnabled,
+		BaseURL:   cfg.Features.JudgeBaseURL,
+		APIKey:    cfg.Features.JudgeAPIKey,
+		Model:     cfg.Features.JudgeModel,
+		TimeoutMS: cfg.Features.JudgeTimeoutMS,
+	}
 	// 客户端风控指纹（对齐官方桌面端）：UA 三段式 + 用量归属四头 + X-Device-Token
 	wbUp.ClientName = cfg.Upstream.ClientName
 	wbUp.ClientVersion = cfg.Upstream.ClientVersion

@@ -131,9 +131,14 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站消息内容指纹脱敏（默认开启）
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
-		// ContentFirewall 内容防火墙（默认开启）：拦截会导致上游整号拉黑的
-		// 高危内容（未成年+NSFW / 越狱声明），保护账号池
+		// ContentFirewall 内容防火墙（默认开启）：关键词命中后交外部审查判定。
 		ContentFirewall *bool `json:"content_firewall,omitempty"`
+		// JudgeEnabled 外部 LLM 审查。未启用或未配齐时关键词命中也放行（fail-open）。
+		JudgeEnabled   bool   `json:"judge_enabled,omitempty"`
+		JudgeBaseURL   string `json:"judge_base_url,omitempty"`
+		JudgeAPIKey    string `json:"judge_api_key,omitempty"`
+		JudgeModel     string `json:"judge_model,omitempty"`
+		JudgeTimeoutMS int    `json:"judge_timeout_ms,omitempty"`
 	} `json:"features"`
 
 	Prompt struct {

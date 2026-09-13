@@ -291,3 +291,23 @@ func TestChatStreamPlain400NoRetry(t *testing.T) {
 
 // 11140（内容安全审核，403）：换中性 system 无效（实测降级提示词下仍被拦），
 // 已改透传策略，断言见 TestChatStreamSafetyBlocked11140Passthrough。
+
+func TestChatStreamJudgeInactiveFailOpen(t *testing.T) {
+	var calls int
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return textResp(200, "data: [DONE]\n\n"), nil
+	})
+	c.ContentFirewall = true
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"这个没有涉及到未成年性化吧"}]}`)
+	rc, status, respBody, err := c.ChatStream(&auth.Auth{AccessToken: "at", UID: "u1"}, body)
+	if err != nil || status != 200 {
+		t.Fatalf("fail-open want 200, status=%d err=%v body=%s", status, err, respBody)
+	}
+	if rc != nil {
+		rc.Close()
+	}
+	if calls != 1 {
+		t.Fatalf("upstream calls=%d want 1", calls)
+	}
+}

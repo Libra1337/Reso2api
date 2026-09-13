@@ -106,9 +106,10 @@ type Client struct {
 	// SanitizeFingerprints 开启后出站消息内容做指纹脱敏（sanitize.go）。
 	SanitizeFingerprints bool
 
-	// ContentFirewall 开启后出站前做内容防火墙检查（firewall.go）：
-	// 拦截会导致上游整号拉黑的高危内容（未成年+NSFW、越狱声明），保护账号池。
+	// ContentFirewall 开启后出站前做内容防火墙检查（firewall.go）。
+	// 关键词命中后若 Judge 可用，则交外部 LLM 判定；否则 fail-open 放行。
 	ContentFirewall bool
+	Judge           JudgeConfig
 
 	fwMu   sync.Mutex      // 防火墙命中事件锁
 	fwHits []FirewallEvent // 环形（最新在后，cap 500，内存态）
@@ -370,14 +371,30 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	prepared, degraded := c.applyPrompt(PrepareBodyOptWithEfforts(body, c.SanitizeFingerprints, c.effortsSnapshot()))
 	// 内容防火墙：高危内容不出网关（上游拉黑是整号永久的，代价不可逆）。
 	if c.ContentFirewall {
-		if rule, excerpt, action := FirewallCheck(prepared); action == ActionObserve {
-			// 标记模式：请求照常转发，事件留观测
-			log.Printf("FIREWALL uid=%s rule=%s match=%.120s -> observed (forwarded)", a.UID, rule, excerpt)
-			c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared, true)
-		} else if action == ActionBlock {
-			log.Printf("FIREWALL uid=%s rule=%s match=%.120s -> blocked", a.UID, rule, excerpt)
-			c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared, false)
-			return nil, http.StatusForbidden, FirewallHitResponse(rule), nil
+		if rule, excerpt, action := FirewallCheck(prepared); action != "" {
+			if action == ActionObserve {
+				log.Printf("FIREWALL uid=%s rule=%s match=%.120s -> observed (forwarded)", a.UID, rule, excerpt)
+				c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared, true)
+			} else if action == ActionBlock {
+				if c.Judge.Active() {
+					text := extractMessageText(prepared)
+					v, jerr := callJudge(c.Judge, []string{FirewallKeyword(rule)}, []string{text})
+					if jerr != nil {
+						log.Printf("FIREWALL uid=%s rule=%s judge failed (%v) -> fail-open", a.UID, rule, jerr)
+						c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared, true)
+					} else if v.Blocks() {
+						log.Printf("FIREWALL uid=%s rule=%s judge=%s reason=%.120s -> blocked", a.UID, rule, v.Category, v.Reason)
+						c.recordFirewallHit(a, v.Keyword(), extractModel(prepared), excerpt, prepared, false)
+						return nil, http.StatusForbidden, FirewallHitResponse(v.Keyword()), nil
+					} else {
+						log.Printf("FIREWALL uid=%s rule=%s judge=%s -> marked (forwarded)", a.UID, rule, v.Category)
+						c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared, true)
+					}
+				} else {
+					log.Printf("FIREWALL uid=%s rule=%s match=%.120s -> fail-open (judge inactive)", a.UID, rule, excerpt)
+					c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared, true)
+				}
+			}
 		}
 	}
 	rc, status, respBody, err = c.chatOnce(a, prepared)

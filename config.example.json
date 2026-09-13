@@ -33,6 +33,14 @@
   "upstream": {
     "timeout_seconds": 120
   },
+  "features": {
+    "content_firewall": true,
+    "judge_enabled": false,
+    "judge_base_url": "",
+    "judge_api_key": "",
+    "judge_model": "",
+    "judge_timeout_ms": 4000
+  },
   "prompt": {
     "mode": "passthrough",
     "file": ""
