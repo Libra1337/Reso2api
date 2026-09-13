@@ -8,6 +8,8 @@ import ApiPage from "@/pages/ApiPage";
 import RequestLogsPage from "@/pages/RequestLogsPage";
 import LimitsPage from "@/pages/LimitsPage";
 import TasksPage from "@/pages/TasksPage";
+import SchoolPage from "@/pages/SchoolPage";
+import LotteryPage from "@/pages/LotteryPage";
 import FirewallPage from "@/pages/FirewallPage";
 import UsagePage from "@/pages/UsagePage";
 import LogsPage from "@/pages/LogsPage";
@@ -36,6 +38,8 @@ export default function App() {
           <Route path="reqlog" element={<RequestLogsPage />} />
           <Route path="limits" element={<LimitsPage />} />
           <Route path="tasks" element={<TasksPage />} />
+          <Route path="school" element={<SchoolPage />} />
+          <Route path="lottery" element={<LotteryPage />} />
           <Route path="usage" element={<UsagePage />} />
           <Route path="firewall" element={<FirewallPage />} />
           <Route path="logs" element={<LogsPage />} />

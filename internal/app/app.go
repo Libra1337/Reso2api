@@ -1554,6 +1554,88 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, resp)
 	})
+	inner.HandleFunc("GET /api/school/list", func(w http.ResponseWriter, r *http.Request) {
+		uid := r.URL.Query().Get("uid")
+		if uid == "" {
+			apiError(w, http.StatusBadRequest, "uid 必填")
+			return
+		}
+		resp, err := a.SchoolList(uid)
+		if err != nil {
+			apiError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	})
+	inner.HandleFunc("POST /api/school/run", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UID string `json:"uid"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.UID == "" {
+			apiError(w, http.StatusBadRequest, "uid 必填")
+			return
+		}
+		resp, err := a.RunSchoolAccount(req.UID)
+		if err != nil {
+			apiError(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	})
+	inner.HandleFunc("POST /api/school/run_all", func(w http.ResponseWriter, r *http.Request) {
+		if err := a.RunSchoolAll(); err != nil {
+			apiError(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
+	})
+	inner.HandleFunc("GET /api/lottery/status", func(w http.ResponseWriter, r *http.Request) {
+		uid := r.URL.Query().Get("uid")
+		if uid == "" {
+			resp, err := a.LotteryStatusAll()
+			if err != nil {
+				apiError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		resp, err := a.LotteryStatus(uid)
+		if err != nil {
+			apiError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	})
+	inner.HandleFunc("POST /api/lottery/draw", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UID  string `json:"uid"`
+			Kind string `json:"kind"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.UID == "" {
+			apiError(w, http.StatusBadRequest, "uid 必填")
+			return
+		}
+		resp, err := a.RunLotteryAccount(req.UID, req.Kind)
+		if err != nil {
+			apiError(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	})
+	inner.HandleFunc("POST /api/lottery/draw_all", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Kind string `json:"kind"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.RunLotteryAll(req.Kind); err != nil {
+			apiError(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
+	})
 	inner.HandleFunc("POST /api/tasks/auto_all", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UID  string   `json:"uid"`

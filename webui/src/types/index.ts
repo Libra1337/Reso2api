@@ -233,6 +233,81 @@ export interface TasksListResult {
   actions: TaskActionMeta[];
 }
 
+export interface SchoolTask {
+  task_code: string;
+  title?: string;
+  description?: string;
+  status?: string;
+  progress: number;
+  target_count: number;
+  task_type?: string;
+  reward_credit?: number;
+  mode?: "manual" | "share" | "report" | "unknown" | string;
+  note?: string;
+  report_kind?: string;
+}
+
+export interface SchoolListResult {
+  uid: string;
+  nickname?: string;
+  in_period: boolean;
+  tasks: SchoolTask[];
+}
+
+export interface SchoolRunResult {
+  ok: boolean;
+  skipped?: boolean;
+  message: string;
+  in_period?: boolean;
+  stats?: Record<string, number>;
+  lines?: string[];
+}
+
+export interface SchoolChance {
+  balance: number;
+  total_earned: number;
+  voucher_won?: boolean;
+  lottery_limit?: number;
+}
+
+export interface SchoolPrize {
+  prize_code: string;
+  label?: string;
+}
+
+export interface LotteryStreakStatus {
+  chances: number;
+  error?: string;
+}
+
+export interface LotterySchoolStatus {
+  in_period: boolean;
+  chance?: SchoolChance;
+  prizes?: SchoolPrize[];
+  error?: string;
+}
+
+export interface LotteryStatusResult {
+  uid: string;
+  nickname?: string;
+  streak: LotteryStreakStatus;
+  school: LotterySchoolStatus;
+  error?: string;
+}
+
+export interface LotteryStatusAllResult {
+  accounts: LotteryStatusResult[];
+}
+
+export interface LotteryDrawResult {
+  ok: boolean;
+  uid?: string;
+  kind?: string;
+  message?: string;
+  streak?: { ok?: boolean; message?: string; drawn?: number };
+  school?: { ok?: boolean; message?: string; drawn?: number; credit?: number };
+}
+
 export interface TaskAutoResult {
   ok: boolean;
   skipped?: boolean;

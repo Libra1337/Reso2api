@@ -135,6 +135,30 @@ export const api = {
   taskAutoAllBatch: () =>
     request<import("@/types").SimpleResult>("/tasks/auto_all", { all: true }),
 
+  schoolList: (uid: string) =>
+    request<import("@/types").SchoolListResult>(
+      `/school/list?uid=${encodeURIComponent(uid)}`,
+    ),
+
+  schoolRun: (uid: string) =>
+    request<import("@/types").SchoolRunResult>("/school/run", { uid }),
+
+  schoolRunAll: () =>
+    request<import("@/types").SimpleResult>("/school/run_all", {}),
+
+  lotteryStatus: (uid?: string) =>
+    uid
+      ? request<import("@/types").LotteryStatusResult>(
+          `/lottery/status?uid=${encodeURIComponent(uid)}`,
+        )
+      : request<import("@/types").LotteryStatusAllResult>("/lottery/status"),
+
+  lotteryDraw: (uid: string, kind: "streak" | "school" | "all" = "all") =>
+    request<import("@/types").LotteryDrawResult>("/lottery/draw", { uid, kind }),
+
+  lotteryDrawAll: (kind: "streak" | "school" | "all" = "all") =>
+    request<import("@/types").SimpleResult>("/lottery/draw_all", { kind }),
+
   travelStatus: (force = false) =>
     request<import("@/types").TravelStatusResult>(
       `/travel/status${force ? "?refresh=1" : ""}`,
