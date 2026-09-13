@@ -120,7 +120,7 @@ func readDeviceTokenFile(fp string) string {
 }
 
 // injectDeviceToken 仅在取到非空 token 时注入。refresh/models 类请求不注入
-//（鉴权头组带设备 token 无意义且可能被风控误判）。
+// （鉴权头组带设备 token 无意义且可能被风控误判）。
 func (c *Client) injectDeviceToken(req *http.Request, a *auth.Auth) {
 	if tok := c.resolveDeviceToken(a); tok != "" {
 		req.Header.Set("X-Device-Token", tok)

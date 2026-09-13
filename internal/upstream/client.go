@@ -315,6 +315,13 @@ func (c *Client) degradeTrigger() {
 	c.degradeMu.Unlock()
 }
 
+// isContentBlocked 上游内容拦截类错误：11128（指纹误报拦截）与
+// 11140（内容安全审核 "request illegal"）。两者都值得换中性 system 重试一次——
+// system 模板句参与审核判定，中性化后大量"误杀"请求可过。
+func isContentBlocked(body []byte) bool {
+	return strings.Contains(string(body), "11128") || strings.Contains(string(body), "11140")
+}
+
 // applyPrompt 按模式做出站前系统提示词改写（返回改写后的 body 与是否已降级）。
 func (c *Client) applyPrompt(body []byte) ([]byte, bool) {
 	switch c.PromptMode {
@@ -331,17 +338,17 @@ func (c *Client) applyPrompt(body []byte) ([]byte, bool) {
 // ChatStream 发 chat 请求并返回原始 SSE body 流（调用方负责 Close）。
 // 非 2xx 时 rc 为 nil、body 为上游响应体（供调用方 Classify(status, string(body))、err 为 nil；
 // 只有传输层失败才返回 err。
-// 内容拦截（400 + 11128）自愈：passthrough 模式首遇触发降级窗口并换中性
-// 提示词同请求重试一次；custom 模式 system 已被替换，11128 意味着用户
-// 内容触发审核，同样换中性 system 重试一次（无害，用户消息不动）。
+// 内容拦截（11128 指纹误报 / 11140 内容审核）自愈：passthrough 模式首遇
+// 触发降级窗口并换中性提示词同请求重试一次；custom 模式 system 已被替换，
+// 被拦意味着内容触发审核，同样换中性 system 重试一次（无害，用户消息不动）。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	prepared, degraded := c.applyPrompt(PrepareBodyOptWithEfforts(body, c.SanitizeFingerprints, c.effortsSnapshot()))
 	rc, status, respBody, err = c.chatOnce(a, prepared)
 	if err != nil || status < 400 {
 		return rc, status, respBody, err
 	}
-	if status == http.StatusBadRequest && strings.Contains(string(respBody), "11128") && !degraded {
-		log.Printf("chat_stream uid=%s: content-blocked (11128) -> degraded prompt retry", a.UID)
+	if (status == http.StatusBadRequest || status == http.StatusForbidden) && isContentBlocked(respBody) && !degraded {
+		log.Printf("chat_stream uid=%s: content-blocked (11128/11140, status %d) -> degraded prompt retry", a.UID, status)
 		c.degradeTrigger()
 		return c.chatOnce(a, prompt.Rewrite(prepared, prompt.Degraded))
 	}
@@ -376,9 +383,9 @@ func (c *Client) chatOnce(a *auth.Auth, prepared []byte) (rc io.ReadCloser, stat
 		kind := Classify(resp.StatusCode, string(raw))
 		log.Printf("chat_stream uid=%s: upstream %d %s body=%s",
 			a.UID, resp.StatusCode, kind, truncate(string(raw), 200))
-		// 诊断：安全策略命中时记录脱敏后仍被拦的载荷片段（定位未知新指纹）
-		if strings.Contains(string(raw), "11128") {
-			log.Printf("11128 payload snippet uid=%s: %.8000s", a.UID, prepared)
+		// 诊断：安全策略命中时记录脱敏后仍被拦的载荷片段（定位未知新指纹/审核触发内容）
+		if isContentBlocked(raw) {
+			log.Printf("content-block payload snippet uid=%s: %.8000s", a.UID, prepared)
 		}
 		return nil, resp.StatusCode, raw, nil
 	}
@@ -582,9 +589,9 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 					CycleCapacitySize   int64  `json:"CycleCapacitySize"`
 					CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
 					CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
-					CreateTime          int64  `json:"CreateTime"`     // 毫秒
-					CycleEndTime        string `json:"CycleEndTime"`  // 周期到期文案
-					ExpiredTime         string `json:"ExpiredTime"`   // 资源到期文案
+					CreateTime          int64  `json:"CreateTime"`   // 毫秒
+					CycleEndTime        string `json:"CycleEndTime"` // 周期到期文案
+					ExpiredTime         string `json:"ExpiredTime"`  // 资源到期文案
 				} `json:"Accounts"`
 			} `json:"Data"`
 		} `json:"Response"`
