@@ -4,6 +4,7 @@ import {
   Check,
   ChevronDown,
   ClipboardList,
+  Gauge,
   Key,
   LayoutDashboard,
   LogOut,
@@ -27,6 +28,7 @@ const navItems = [
   { to: "/admin/token", label: "账号管理", icon: ShieldCheck },
   { to: "/admin/keys", label: "API 接入", icon: Key },
   { to: "/admin/reqlog", label: "请求日志", icon: Activity },
+  { to: "/admin/limits", label: "模型限流", icon: Gauge },
   { to: "/admin/logs", label: "运行日志", icon: ClipboardList },
 ];
 
@@ -36,6 +38,7 @@ const pageTitles: Record<string, string> = {
   "/admin/token": "账号管理",
   "/admin/keys": "API 接入",
   "/admin/reqlog": "请求日志",
+  "/admin/limits": "模型限流",
   "/admin/logs": "运行日志",
 };
 
