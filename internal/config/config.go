@@ -131,6 +131,9 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站消息内容指纹脱敏（默认开启）
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// ContentFirewall 内容防火墙（默认开启）：拦截会导致上游整号拉黑的
+		// 高危内容（未成年+NSFW / 越狱声明），保护账号池
+		ContentFirewall *bool `json:"content_firewall,omitempty"`
 	} `json:"features"`
 
 	Prompt struct {
@@ -164,6 +167,8 @@ func Default() *Config {
 	c.Schedule.KeepaliveHours = []int{22}
 	c.Upstream.TimeoutSeconds = 120
 	c.Features.SanitizeBlacklistFingerprints = true
+	fwOn := true
+	c.Features.ContentFirewall = &fwOn
 	c.Prompt.Mode = "passthrough"
 	return c
 }

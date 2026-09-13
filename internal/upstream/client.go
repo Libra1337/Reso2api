@@ -106,6 +106,10 @@ type Client struct {
 	// SanitizeFingerprints 开启后出站消息内容做指纹脱敏（sanitize.go）。
 	SanitizeFingerprints bool
 
+	// ContentFirewall 开启后出站前做内容防火墙检查（firewall.go）：
+	// 拦截会导致上游整号拉黑的高危内容（未成年+NSFW、越狱声明），保护账号池。
+	ContentFirewall bool
+
 	// PromptMode 系统提示词策略（internal/prompt）：
 	//   - "custom"：出站前用 PromptText 替换客户端 system/developer（源头消灭 system 指纹误报）；
 	//   - "passthrough"（默认）：透传客户端原始 system；被 11128 内容拦截时
@@ -361,6 +365,13 @@ func (c *Client) applyPrompt(body []byte) ([]byte, bool) {
 // 11140 内容审核不在此列（换 system 无效，见 isSafetyBlock）。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	prepared, degraded := c.applyPrompt(PrepareBodyOptWithEfforts(body, c.SanitizeFingerprints, c.effortsSnapshot()))
+	// 内容防火墙：高危内容不出网关（上游拉黑是整号永久的，代价不可逆）。
+	if c.ContentFirewall {
+		if rule, hit := FirewallCheck(prepared); hit {
+			log.Printf("FIREWALL uid=%s rule=%s -> blocked (content not sent upstream)", a.UID, rule)
+			return nil, http.StatusForbidden, FirewallHitResponse(rule), nil
+		}
+	}
 	rc, status, respBody, err = c.chatOnce(a, prepared)
 	if err != nil || status < 400 {
 		return rc, status, respBody, err

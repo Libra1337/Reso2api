@@ -12,8 +12,8 @@ import (
 	"encoding/json"
 
 	"fmt"
-	"wild-work/internal/auth"
 	"net/http"
+	"wild-work/internal/auth"
 )
 
 // streakRedeemPath / lottery 路径（growth 域，growthJSON 走 www.workbuddy.cn）。

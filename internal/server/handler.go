@@ -563,6 +563,12 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 			case provider.ErrServer:
 				rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 			default: // ErrClient / ErrNotFound：请求本身被上游拒绝，原样透传
+				// 11140 内容审核熔断：短窗多次说明持续发违规内容，停号止损防整号拉黑
+				if status == http.StatusForbidden && strings.Contains(string(respBody), "11140") {
+					if rt.Pool.NoteContentBlock(acct.UID) {
+						log.Printf("content-block circuit breaker: disable platform=%s uid=%s (11140 x3/h)", rt.Kind, acct.UID)
+					}
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
 				_, _ = w.Write(respBody)

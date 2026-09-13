@@ -4,6 +4,7 @@ package pool
 
 import (
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -60,6 +61,10 @@ type entry struct {
 	reason   string
 	until    time.Time
 	errCount int
+
+	// contentBlocks 最近 11140 内容审核拦截时间戳（内存态）：短窗内多次
+	// 说明该号在持续发违规内容，自动禁用止损（防"烧号"——上游会整号拉黑）。
+	contentBlocks []time.Time
 
 	// sessionDeadFails 连续 12153 计数（内存态，重启清零）：
 	// 单次 session-dead 判定大多是接口抖动误报，连续 N 次才真正禁用。
@@ -388,6 +393,35 @@ func (p *Pool) ModelCooldowns() []ModelCoolSummary {
 	// 被限账号最多的模型排前面（最受关注的先看）
 	sort.Slice(out, func(i, j int) bool { return len(out[i].Cooled) > len(out[j].Cooled) })
 	return out
+}
+
+// NoteContentBlock 记一次上游 11140（内容审核拦截）。返回 true 表示
+// 已达熔断阈值并禁用：1 小时内 ≥3 次 = 该号在持续发送违规内容，
+// 继续放行大概率被整号拉黑，先自动停用止损（面板可手动重启用）。
+func (p *Pool) NoteContentBlock(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	now := time.Now()
+	kept := e.contentBlocks[:0]
+	for _, t := range e.contentBlocks {
+		if now.Sub(t) < time.Hour {
+			kept = append(kept, t)
+		}
+	}
+	kept = append(kept, now)
+	e.contentBlocks = kept
+	if len(e.contentBlocks) >= 3 {
+		e.disabled = true
+		e.reason = "11140 x" + fmt.Sprintf("%d", len(e.contentBlocks)) + "/h 内容审核熔断（防烧号）"
+		e.contentBlocks = nil
+		p.saveLocked()
+		return true
+	}
+	return false
 }
 
 // SessionDeadThreshold 暴露连续 12153 的禁用阈值（调度日志/运维引用）。

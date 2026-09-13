@@ -266,3 +266,22 @@ func TestCooldownSoftForModel(t *testing.T) {
 		t.Fatal("expired model cooldown should clear")
 	}
 }
+
+// 11140 熔断：1 小时内 3 次自动禁用（防持续违规内容烧号）。
+func TestNoteContentBlockCircuitBreaker(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	if p.NoteContentBlock("u1") {
+		t.Fatal("first block must not disable")
+	}
+	if p.NoteContentBlock("u1") {
+		t.Fatal("second block must not disable")
+	}
+	if !p.NoteContentBlock("u1") {
+		t.Fatal("third block within 1h should disable")
+	}
+	st, _ := p.Status("u1")
+	if !st.Disabled || st.Reason == "" {
+		t.Fatalf("should be disabled with reason: %+v", st)
+	}
+}

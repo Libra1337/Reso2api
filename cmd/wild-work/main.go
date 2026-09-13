@@ -109,6 +109,7 @@ func main() {
 	wbUp := upstream.New()
 	wbUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	wbUp.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
+	wbUp.ContentFirewall = cfg.Features.ContentFirewall == nil || *cfg.Features.ContentFirewall
 	// 客户端风控指纹（对齐官方桌面端）：UA 三段式 + 用量归属四头 + X-Device-Token
 	wbUp.ClientName = cfg.Upstream.ClientName
 	wbUp.ClientVersion = cfg.Upstream.ClientVersion
