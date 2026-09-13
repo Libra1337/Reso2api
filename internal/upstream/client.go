@@ -370,9 +370,13 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	prepared, degraded := c.applyPrompt(PrepareBodyOptWithEfforts(body, c.SanitizeFingerprints, c.effortsSnapshot()))
 	// 内容防火墙：高危内容不出网关（上游拉黑是整号永久的，代价不可逆）。
 	if c.ContentFirewall {
-		if rule, excerpt, hit := FirewallCheck(prepared); hit {
+		if rule, excerpt, action := FirewallCheck(prepared); action == ActionObserve {
+			// 标记模式：请求照常转发，事件留观测
+			log.Printf("FIREWALL uid=%s rule=%s match=%.120s -> observed (forwarded)", a.UID, rule, excerpt)
+			c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared, true)
+		} else if action == ActionBlock {
 			log.Printf("FIREWALL uid=%s rule=%s match=%.120s -> blocked", a.UID, rule, excerpt)
-			c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared)
+			c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared, false)
 			return nil, http.StatusForbidden, FirewallHitResponse(rule), nil
 		}
 	}

@@ -275,6 +275,7 @@ export interface FirewallEvent {
   model?: string;
   snippet?: string;
   content?: string;
+  observe?: boolean;
 }
 
 export interface FirewallStatsResult {
