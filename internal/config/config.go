@@ -208,15 +208,41 @@ func Load(path string) (*Config, error) {
 }
 
 // Save 以 0600 原子写回配置。
+// Docker 把单个 config.json 绑成文件时，同目录 rename tmp->目标会报
+// device or resource busy；此时改写到可 rename 的 data/config.json。
 func Save(c *Config, path string) error {
 	raw, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	if dir := filepath.Dir(path); dir != "" {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		_ = os.MkdirAll(dir, 0o755)
 	}
-	return auth.WriteFileSync(path, raw, 0o600)
+	if err := auth.WriteFileSync(path, raw, 0o600); err == nil {
+		return nil
+	} else if !isBusyRename(err) {
+		return err
+	}
+	fallback := filepath.Join("data", "config.json")
+	if c != nil && strings.TrimSpace(c.StateFile) != "" {
+		fallback = filepath.Join(filepath.Dir(c.StateFile), "config.json")
+	}
+	if dir := filepath.Dir(fallback); dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	if err := auth.WriteFileSync(fallback, raw, 0o600); err != nil {
+		return fmt.Errorf("rename %s.tmp: device or resource busy; fallback %s: %v", path, fallback, err)
+	}
+	_ = os.WriteFile(path, raw, 0o600)
+	return nil
+}
+
+func isBusyRename(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "device or resource busy") || strings.Contains(s, "resource busy")
 }
 
 // ParseClockTimes 将 HH:MM 列表转换为当天分钟数（0..1439）。

@@ -46,6 +46,9 @@ func main() {
 	}
 
 	cfgPath := "config.json"
+	if _, err := os.Stat("data/config.json"); err == nil {
+		cfgPath = "data/config.json" // Docker 单文件 bind 时热更新写在这里
+	}
 	cfg, err := config.Load(cfgPath)
 	// --autostart 由开机自启项附带：开机启动不弹提示
 	// --no-tray 无头模式（无桌面 Linux/服务器）

@@ -11,4 +11,6 @@ services:
     volumes:
       - ./auths:/app/auths
       - ./data:/app/data
+      # 单文件 bind 会让 config.json.tmp → rename 报 device or resource busy。
+      # 仍挂这一份给启动读取；面板保存会改写 data/config.json 并尽力回写这里。
       - ./config.json:/app/config.json
