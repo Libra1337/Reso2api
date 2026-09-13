@@ -63,7 +63,11 @@ export default function LimitsPage() {
             模型限流
           </h2>
           <p className="text-xs text-muted-foreground">
-            各模型的每日用量限额（6004）与账号冷却实况 · 30 秒自动刷新
+            每日用量限额（6004）按 <b>账号 × 模型</b> 独立计算 · 30 秒自动刷新
+          </p>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            某账号的某模型被限 ≠
+            模型不可用：该账号的其他模型、其他账号的同款模型都不受影响
           </p>
         </div>
         <Button
@@ -187,10 +191,10 @@ export default function LimitsPage() {
                     {m.cooled.map((c) => (
                       <span
                         key={c.uid}
-                        className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
-                        title={`UID ${c.uid}`}
+                        className="rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-400"
+                        title={`${c.nickname || ""} UID ${c.uid} — 仅此账号的此模型被限，该账号其他模型不受影响`}
                       >
-                        {c.uid.slice(0, 8)} · {fmtUntil(c.until)}
+                        {c.nickname || c.uid.slice(0, 8)} · {fmtUntil(c.until)}
                       </span>
                     ))}
                   </div>

@@ -335,9 +335,12 @@ func (p *Pool) CooledForModel(uid, model string) bool {
 }
 
 // ModelCoolEntry 单账号在某模型上的冷却明细。
+// 注意：6004 限额是 账号×模型 各自独立的——此条目只表示
+// 该账号的该模型被限，不影响此账号其他模型、也不影响其他账号。
 type ModelCoolEntry struct {
-	UID   string    `json:"uid"`
-	Until time.Time `json:"until"`
+	UID      string    `json:"uid"`
+	Nickname string    `json:"nickname,omitempty"`
+	Until    time.Time `json:"until"`
 }
 
 // ModelCoolSummary 模型维度的限流聚合（面板「模型限流」页数据源）。
@@ -366,7 +369,7 @@ func (p *Pool) ModelCooldowns() []ModelCoolSummary {
 				delete(e.modelCool, model) // 过期清理
 				continue
 			}
-			agg[model] = append(agg[model], ModelCoolEntry{UID: uid, Until: until})
+			agg[model] = append(agg[model], ModelCoolEntry{UID: uid, Nickname: e.a.Nickname, Until: until})
 		}
 	}
 	if len(agg) == 0 {
