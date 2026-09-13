@@ -58,7 +58,7 @@ var firewallRules = []firewallRule{
 		Pattern: regexp.MustCompile(`(?i)(炸弹|爆炸装置|炸药|土制炸弹|核武器|脏弹|生化武器|神经毒剂|沙林毒气|vx毒剂|蓖麻毒素|c4炸药|\bied\b|bomb|explosive device)`),
 		Pair:    regexp.MustCompile(`(?i)(制造|制作|合成|配方|原料|怎么造|如何制造|how to (make|build)|make a bomb|build.*explosive)`)},
 	{Name: "drug-synthesis", Observe: true,
-		Pattern: regexp.MustCompile(`(?i)(冰毒|甲基苯丙胺|海洛因|摇头丸|meth(amphetamine)?|heroin|合成大麻|k粉|氯胺酮(粉)?)`),
+		Pattern: regexp.MustCompile(`(?i)(冰毒|甲基苯丙胺|海洛因|摇头丸|\bmeth(amphetamine)?\b|heroin|合成大麻|k粉|氯胺酮(粉)?)`),
 		Pair:    regexp.MustCompile(`(?i)(合成|制作|提纯|配方|工艺|制毒|how to (make|synthesize)|synthesize)`)},
 	{Name: "malware", Observe: true,
 		Pattern: regexp.MustCompile(`(?i)(勒索软件|ransomware|僵尸网络|botnet|键盘记录器|keylogger|挖矿木马|蠕虫病毒(攻击)|ddos(攻击工具)?)`),
