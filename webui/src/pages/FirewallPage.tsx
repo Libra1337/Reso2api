@@ -11,6 +11,13 @@ import type { FirewallStatsResult } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 // 规则分级：A 级（平台最高红线）/ B 级（武器毒品恶意软件等）/ 声明类（越狱）
@@ -49,6 +56,7 @@ export default function FirewallPage() {
   const [data, setData] = useState<FirewallStatsResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [detail, setDetail] = useState<number | null>(null); // 打开弹窗的事件索引
 
   const load = useCallback(async () => {
     setRefreshing(true);
@@ -71,6 +79,7 @@ export default function FirewallPage() {
   const events = data?.events ?? [];
   const rules = data?.rules ?? [];
   const maxCount = Math.max(...rules.map((r) => r.count), 1);
+  const detailEvent = detail != null ? events[detail] : undefined;
 
   return (
     <div className="space-y-4">
@@ -216,7 +225,9 @@ export default function FirewallPage() {
                 return (
                   <div
                     key={`${e.at}-${i}`}
-                    className="flex items-start gap-2 rounded-md bg-muted/40 px-2.5 py-1.5 text-xs"
+                    className="flex cursor-pointer items-start gap-2 rounded-md bg-muted/40 px-2.5 py-1.5 text-xs transition-colors hover:bg-muted"
+                    onClick={() => setDetail(i)}
+                    title="点击查看完整内容"
                   >
                     <span className="shrink-0 tabular-nums text-muted-foreground">
                       {fmtTime(e.at)}
@@ -253,6 +264,38 @@ export default function FirewallPage() {
         政策高危（武器/毒品/恶意软件/深伪/自杀教唆，主题×意图双信号）；黄 =
         越狱与合法化声明。B 级采用双信号共现，正常编程与安全研究不误杀。
       </p>
+
+      {/* 完整内容弹窗 */}
+      <Dialog
+        open={detailEvent != null}
+        onOpenChange={(next) => !next && setDetail(null)}
+      >
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex flex-wrap items-center gap-2">
+              <span
+                className={cn(
+                  "rounded border px-1.5 py-0.5 text-[10px] font-medium",
+                  levelStyle[RULE_LEVEL[detailEvent?.rule ?? ""]?.level ?? "C"],
+                )}
+              >
+                {RULE_LEVEL[detailEvent?.rule ?? ""]?.label ??
+                  detailEvent?.rule}
+              </span>
+              拦截详情
+            </DialogTitle>
+            {detailEvent && (
+              <DialogDescription className="font-mono text-[11px]">
+                {fmtTime(detailEvent.at)} · {detailEvent.model || "-"} ·{" "}
+                {(detailEvent.uid || "").slice(0, 8)}
+              </DialogDescription>
+            )}
+          </DialogHeader>
+          <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted/50 p-3 font-mono text-xs leading-relaxed">
+            {detailEvent?.content || detailEvent?.snippet || "（无文本内容）"}
+          </pre>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

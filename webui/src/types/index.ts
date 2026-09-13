@@ -273,6 +273,7 @@ export interface FirewallEvent {
   uid?: string;
   model?: string;
   snippet?: string;
+  content?: string;
 }
 
 export interface FirewallStatsResult {

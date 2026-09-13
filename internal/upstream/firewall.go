@@ -150,17 +150,21 @@ type FirewallEvent struct {
 	Rule    string `json:"rule"`
 	UID     string `json:"uid,omitempty"`
 	Model   string `json:"model,omitempty"`
-	Snippet string `json:"snippet,omitempty"` // 命中内容摘要（前 80 字符，脱敏展示）
+	Snippet string `json:"snippet,omitempty"` // 列表摘要（前 80 字符）
+	Content string `json:"content,omitempty"` // 完整内容（截 4000 字，弹窗展示）
 }
 
 const firewallEventCap = 500
 
 // recordFirewallHit 记录一次拦截（环形截断）。
 func (c *Client) recordFirewallHit(a *auth.Auth, rule, model string, prepared []byte) {
-	snippet := extractMessageText(prepared)
-	snippet = strings.ReplaceAll(snippet, "\n", " ")
+	content := extractMessageText(prepared)
+	snippet := strings.ReplaceAll(content, "\n", " ")
 	if r := []rune(snippet); len(r) > 80 {
 		snippet = string(r[:80]) + "…"
+	}
+	if r := []rune(content); len(r) > 4000 {
+		content = string(r[:4000]) + "\n…（内容过长截断）"
 	}
 	uid := ""
 	if a != nil {
@@ -169,7 +173,8 @@ func (c *Client) recordFirewallHit(a *auth.Auth, rule, model string, prepared []
 	c.fwMu.Lock()
 	defer c.fwMu.Unlock()
 	c.fwHits = append(c.fwHits, FirewallEvent{
-		At: time.Now().Unix(), Rule: rule, UID: uid, Model: model, Snippet: snippet,
+		At: time.Now().Unix(), Rule: rule, UID: uid, Model: model,
+		Snippet: snippet, Content: content,
 	})
 	if len(c.fwHits) > firewallEventCap {
 		c.fwHits = c.fwHits[len(c.fwHits)-firewallEventCap:]
