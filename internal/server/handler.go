@@ -741,6 +741,13 @@ func webCache(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimPrefix(r.URL.Path, "/")
 		if p == "" || p == "index.html" {
+			// 历史版本给首页带 ?v=<ts> 做缓存穿透，旧地址在浏览器侧被启发式
+			// 缓存后无法失效——301 到无参地址（不同缓存键必取新），一劳永逸。
+			// hash 路由（#/...）由浏览器在重定向后自动保留。
+			if r.URL.RawQuery != "" {
+				http.Redirect(w, r, "./", http.StatusMovedPermanently)
+				return
+			}
 			w.Header().Set("Cache-Control", "no-cache")
 		} else if strings.HasPrefix(p, "assets/") {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
