@@ -100,6 +100,9 @@ export const api = {
   taskAutoAll: (uid: string) =>
     request<import("@/types").SimpleResult>("/tasks/auto_all", { uid }),
 
+  taskAutoAllBatch: () =>
+    request<import("@/types").SimpleResult>("/tasks/auto_all", { all: true }),
+
   travelStatus: (force = false) =>
     request<import("@/types").TravelStatusResult>(
       `/travel/status${force ? "?refresh=1" : ""}`,

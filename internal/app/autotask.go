@@ -547,6 +547,66 @@ func (a *App) RunTaskAuto(uid, taskCode string) (map[string]any, error) {
 	return resp, nil
 }
 
+// taskBatchMu 全局批量互斥：同一时间只允许一轮批量（或单号）流水线。
+var taskBatchMu sync.Mutex
+
+// RunTaskAutoAllBatch 批量：对多个账号串行执行全量任务（串行防风控；
+// 每号进度独立进任务动态流）。uALL=true 表示全部可用 workbuddy 账号。
+func (a *App) RunTaskAutoAllBatch(uids []string, uALL bool) error {
+	api, rt := a.workbuddyTaskAPI()
+	if api == nil {
+		return fmt.Errorf("workbuddy 平台未启用")
+	}
+	if uALL {
+		uids = nil
+		for _, st := range rt.Pool.List() {
+			if !st.Disabled {
+				uids = append(uids, st.UID)
+			}
+		}
+	}
+	if len(uids) == 0 {
+		return fmt.Errorf("没有可执行的账号")
+	}
+	if !a.tryLockTask("__batch__") {
+		return fmt.Errorf("已有一轮批量任务在执行中")
+	}
+	a.NotifyTaskEvent("task", "", fmt.Sprintf("批量任务开始（%d 个账号 × 17 项，串行防风控，预计 %d 分钟）", len(uids), len(uids)*3))
+	a.safeGo(func() {
+		defer a.unlockTask("__batch__")
+		for i, uid := range uids {
+			nickname := uid
+			if acct := rt.Pool.AuthByUID(uid); acct != nil && acct.Nickname != "" {
+				nickname = acct.Nickname
+			}
+			a.NotifyTaskEvent("task", uid, fmt.Sprintf("[%d/%d] %s 开始", i+1, len(uids), nickname))
+			if err := a.runTaskAutoAllSync(uid); err != nil {
+				a.NotifyTaskEvent("task", uid, fmt.Sprintf("[%d/%d] %s 跳过：%v", i+1, len(uids), nickname, err))
+			}
+		}
+		a.NotifyTaskEvent("task", "", fmt.Sprintf("批量任务结束（%d 个账号）", len(uids)))
+	})
+	return nil
+}
+
+// runTaskAutoAllSync 单账号全量任务同步执行（批量复用）。
+func (a *App) runTaskAutoAllSync(uid string) error {
+	api, rt := a.workbuddyTaskAPI()
+	if api == nil {
+		return fmt.Errorf("workbuddy 平台未启用")
+	}
+	acct := rt.Pool.AuthByUID(uid)
+	if acct == nil {
+		return fmt.Errorf("unknown account")
+	}
+	if !a.tryLockTask(uid) {
+		return fmt.Errorf("该账号执行中")
+	}
+	defer a.unlockTask(uid)
+	a.runAutoAllPipeline(api, rt, acct, uid)
+	return nil
+}
+
 // RunTaskAutoAll 单账号全量任务（异步，进度走任务事件流）。
 func (a *App) RunTaskAutoAll(uid string) error {
 	api, rt := a.workbuddyTaskAPI()
@@ -563,58 +623,63 @@ func (a *App) RunTaskAutoAll(uid string) error {
 	a.NotifyTaskEvent("task", uid, "一键完成全部可自动任务开始（17 项，约 2-4 分钟）")
 	a.safeGo(func() {
 		defer a.unlockTask(uid)
-		p := &taskRunner{api: api, emit: func(msg string) { a.NotifyTaskEvent("task", uid, msg) }}
-
-		// 阶段 0：批量接受未接受任务（行为事件才是进度判据，失败不阻塞）。
-		if tasks, err := api.ListTasks(acct); err == nil {
-			var codes []string
-			for _, t := range tasks {
-				if !t.Claimed && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
-					codes = append(codes, t.TaskCode)
-				}
-			}
-			if len(codes) > 0 {
-				_ = api.AcceptTasks(acct, codes)
-				a.NotifyTaskEvent("task", uid, fmt.Sprintf("已批量接受 %d 个任务", len(codes)))
-				time.Sleep(reportGap)
-			}
-		}
-
-		var doneN, skipN, errN int
-		var gained int64
-		for _, act := range autoActions {
-			before, err := p.taskByCode(acct, act.TaskCode)
-			if err != nil || before == nil {
-				skipN++
-				continue
-			}
-			if before.Claimed || (before.Target > 0 && before.Current >= before.Target) {
-				skipN++
-				continue
-			}
-			msg, err := act.run(p, acct)
-			if err != nil {
-				errN++
-				a.NotifyTaskEvent("task", uid, act.TaskCode+" 失败："+err.Error())
-				continue
-			}
-			after, _ := p.taskByCodeWaiting(acct, act.TaskCode)
-			line := act.TaskCode + "：" + msg
-			if after != nil && after.Claimable {
-				if credit, _, cerr := api.ClaimReward(acct, act.TaskCode); cerr == nil && credit > 0 {
-					gained += credit
-					line += fmt.Sprintf("（领奖 +%d）", credit)
-				}
-			}
-			doneN++
-			a.NotifyTaskEvent("task", uid, line)
-			time.Sleep(reportGap)
-		}
-		if remain, rerr := rt.Upstream.UserResource(acct); rerr == nil {
-			rt.Pool.SetCredits(uid, remain)
-		}
-		a.NotifyTaskEvent("task", uid, fmt.Sprintf(
-			"一键完成结束：成功 %d · 跳过 %d · 失败 %d · 本轮领奖 +%d 积分", doneN, skipN, errN, gained))
+		a.runAutoAllPipeline(api, rt, acct, uid)
 	})
 	return nil
+}
+
+// runAutoAllPipeline 单账号全量任务流水线（调用方已持该账号锁）。
+func (a *App) runAutoAllPipeline(api taskAPI, rt *Runtime, acct *auth.Auth, uid string) {
+	p := &taskRunner{api: api, emit: func(msg string) { a.NotifyTaskEvent("task", uid, msg) }}
+
+	// 阶段 0：批量接受未接受任务（行为事件才是进度判据，失败不阻塞）。
+	if tasks, err := api.ListTasks(acct); err == nil {
+		var codes []string
+		for _, t := range tasks {
+			if !t.Claimed && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
+				codes = append(codes, t.TaskCode)
+			}
+		}
+		if len(codes) > 0 {
+			_ = api.AcceptTasks(acct, codes)
+			a.NotifyTaskEvent("task", uid, fmt.Sprintf("已批量接受 %d 个任务", len(codes)))
+			time.Sleep(reportGap)
+		}
+	}
+
+	var doneN, skipN, errN int
+	var gained int64
+	for _, act := range autoActions {
+		before, err := p.taskByCode(acct, act.TaskCode)
+		if err != nil || before == nil {
+			skipN++
+			continue
+		}
+		if before.Claimed || (before.Target > 0 && before.Current >= before.Target) {
+			skipN++
+			continue
+		}
+		msg, err := act.run(p, acct)
+		if err != nil {
+			errN++
+			a.NotifyTaskEvent("task", uid, act.TaskCode+" 失败："+err.Error())
+			continue
+		}
+		after, _ := p.taskByCodeWaiting(acct, act.TaskCode)
+		line := act.TaskCode + "：" + msg
+		if after != nil && after.Claimable {
+			if credit, _, cerr := api.ClaimReward(acct, act.TaskCode); cerr == nil && credit > 0 {
+				gained += credit
+				line += fmt.Sprintf("（领奖 +%d）", credit)
+			}
+		}
+		doneN++
+		a.NotifyTaskEvent("task", uid, line)
+		time.Sleep(reportGap)
+	}
+	if remain, rerr := rt.Upstream.UserResource(acct); rerr == nil {
+		rt.Pool.SetCredits(uid, remain)
+	}
+	a.NotifyTaskEvent("task", uid, fmt.Sprintf(
+		"一键完成结束：成功 %d · 跳过 %d · 失败 %d · 本轮领奖 +%d 积分", doneN, skipN, errN, gained))
 }

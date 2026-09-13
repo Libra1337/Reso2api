@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   Coins,
   Gift,
+  Layers,
   ListTodo,
   LoaderCircle,
   PlayCircle,
@@ -31,6 +32,7 @@ export default function TasksPage() {
   const [loading, setLoading] = useState(false);
   const [busyTask, setBusyTask] = useState<string | null>(null);
   const [autoAllBusy, setAutoAllBusy] = useState(false);
+  const [batchBusy, setBatchBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
@@ -73,6 +75,21 @@ export default function TasksPage() {
       setNotice(e instanceof Error ? e.message : "执行失败");
     } finally {
       setBusyTask(null);
+    }
+  };
+
+  const runBatchAll = async () => {
+    setBatchBusy(true);
+    setNotice(null);
+    try {
+      await api.taskAutoAllBatch();
+      setNotice(
+        `批量任务已启动（全部 ${accounts.filter((x) => !x.disabled).length} 个可用账号 × 17 项，串行执行）。进度见「猫猫乐园 → 任务动态」，每号结束自动领奖并刷新积分`,
+      );
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : "启动失败");
+    } finally {
+      setBatchBusy(false);
     }
   };
 
@@ -130,8 +147,25 @@ export default function TasksPage() {
             ))}
           </select>
           <Button
+            variant="secondary"
             size="sm"
-            disabled={autoAllBusy || !uid}
+            disabled={
+              batchBusy ||
+              autoAllBusy ||
+              accounts.filter((x) => !x.disabled).length === 0
+            }
+            onClick={() => void runBatchAll()}
+          >
+            {batchBusy ? (
+              <LoaderCircle className="mr-1.5 size-3.5 animate-spin" />
+            ) : (
+              <Layers className="mr-1.5 size-3.5" />
+            )}
+            批量全部账号
+          </Button>
+          <Button
+            size="sm"
+            disabled={autoAllBusy || batchBusy || !uid}
             onClick={() => void runAutoAll()}
           >
             {autoAllBusy ? (

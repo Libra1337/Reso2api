@@ -1303,11 +1303,22 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	})
 	inner.HandleFunc("POST /api/tasks/auto_all", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UID string `json:"uid"`
+			UID  string   `json:"uid"`
+			UIDs []string `json:"uids"`
+			All  bool     `json:"all"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.All || len(req.UIDs) > 0 {
+			// 批量：全部可用账号或指定账号列表，串行执行（防风控）
+			if err := a.RunTaskAutoAllBatch(req.UIDs, req.All); err != nil {
+				apiError(w, http.StatusConflict, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "batch": true})
+			return
+		}
 		if req.UID == "" {
-			apiError(w, http.StatusBadRequest, "uid 必填")
+			apiError(w, http.StatusBadRequest, "uid 必填（或传 all/uids 批量）")
 			return
 		}
 		if err := a.RunTaskAutoAll(req.UID); err != nil {
