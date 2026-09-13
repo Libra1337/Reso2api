@@ -124,7 +124,7 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.WebUI != nil {
-		h.mux.Handle("/", http.FileServer(http.FS(cfg.WebUI)))
+		h.mux.Handle("/", webCache(http.FileServer(http.FS(cfg.WebUI))))
 	}
 	if cfg.AttachAPI != nil {
 		cfg.AttachAPI(h.mux)
@@ -730,6 +730,23 @@ func (h *Handler) runtimeKinds() []provider.Kind {
 	}
 	sort.Slice(ks, func(i, j int) bool { return ks[i] < ks[j] })
 	return ks
+}
+
+// webCache SPA 静态资源缓存策略：
+//   - index.html → no-cache：每次回源校验，部署后浏览器必须立刻拿到新资源引用
+//     （缺省无 Cache-Control 时浏览器走启发式缓存，旧 HTML 一直不刷新——
+//     引用已删除的旧 hash JS，表现为"看不到新前端"/白屏）
+//   - assets/*（文件名带构建 hash）→ 一年 immutable：内容变文件名必变，可永存
+func webCache(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := strings.TrimPrefix(r.URL.Path, "/")
+		if p == "" || p == "index.html" {
+			w.Header().Set("Cache-Control", "no-cache")
+		} else if strings.HasPrefix(p, "assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
