@@ -55,7 +55,7 @@ var firewallRules = []firewallRule{
 		`(?i)(圣战宣言|isil|isis(的)?(宣传|宣言|招募)|暴恐袭击宣言|制作(炸弹背心|自杀式)|加入(圣战|isil|isis))`)},
 	// -- 科技/危害类（observe：仅标记，放行）--
 	{Name: "weapon-cbrn", Observe: true,
-		Pattern: regexp.MustCompile(`(?i)(炸弹|爆炸装置|炸药|土制炸弹|核武器|脏弹|生化武器|神经毒剂|沙林毒气|vx毒剂|蓖麻毒素|c4炸药|ied|bomb|explosive device)`),
+		Pattern: regexp.MustCompile(`(?i)(炸弹|爆炸装置|炸药|土制炸弹|核武器|脏弹|生化武器|神经毒剂|沙林毒气|vx毒剂|蓖麻毒素|c4炸药|\bied\b|bomb|explosive device)`),
 		Pair:    regexp.MustCompile(`(?i)(制造|制作|合成|配方|原料|怎么造|如何制造|how to (make|build)|make a bomb|build.*explosive)`)},
 	{Name: "drug-synthesis", Observe: true,
 		Pattern: regexp.MustCompile(`(?i)(冰毒|甲基苯丙胺|海洛因|摇头丸|meth(amphetamine)?|heroin|合成大麻|k粉|氯胺酮(粉)?)`),
