@@ -95,6 +95,10 @@ type App struct {
 	usageCache   *UsageStatsResult
 	usageFetched time.Time
 
+	fwStatsMu    sync.Mutex // 防火墙统计缓存锁
+	fwStatsCache map[string]any
+	fwStatsAt    time.Time
+
 	newAccMu  sync.Mutex      // 新号检测锁
 	knownUIDs map[string]bool // 已知 workbuddy 账号基线（导入 diff 用）
 
@@ -644,32 +648,46 @@ func (a *App) FirewallPage(page, size int) ([]upstream.FirewallEvent, int) {
 	return nil, 0
 }
 
-// FirewallStats 防火墙拦截统计（事件环形 + 规则分布）。
+// FirewallStats 防火墙拦截统计。
+// 统计数据源 = 永久 jsonl（重启延续历史）；事件列表由前端经
+// /api/firewall/page 分页读取，这里只回统计与状态。
 func (a *App) FirewallStats() map[string]any {
+	empty := map[string]any{"enabled": false, "total": 0, "today": 0, "events": []any{}, "rules": []any{}}
 	rt := a.runtime(provider.WorkBuddy)
 	if rt == nil || rt.Upstream == nil {
-		return map[string]any{"enabled": false, "total": 0, "today": 0, "events": []any{}, "rules": []any{}}
+		return empty
 	}
-	api, ok := rt.Upstream.(interface {
-		FirewallEvents() []upstream.FirewallEvent
-		FirewallEnabled() bool
+	enabledAPI, ok := rt.Upstream.(interface{ FirewallEnabled() bool })
+	if !ok {
+		return empty
+	}
+	pager, ok := rt.Upstream.(interface {
+		FirewallEventsPaged(page, size int) ([]upstream.FirewallEvent, int)
 	})
 	if !ok {
-		return map[string]any{"enabled": false, "total": 0, "today": 0, "events": []any{}, "rules": []any{}}
+		return empty
 	}
-	events := api.FirewallEvents()
+
+	// 60s 缓存（永久日志会增长，全量扫描不能每 30s 一次）
+	a.fwStatsMu.Lock()
+	if a.fwStatsCache != nil && time.Since(a.fwStatsAt) < time.Minute {
+		out := a.fwStatsCache
+		a.fwStatsMu.Unlock()
+		out["enabled"] = enabledAPI.FirewallEnabled()
+		return out
+	}
+	a.fwStatsMu.Unlock()
+
+	// 全量扫描永久日志聚合 total/today/rules
+	all, _ := pager.FirewallEventsPaged(0, 1_000_000)
 	today := time.Now().Format("2006-01-02")
 	todayN := 0
 	ruleCount := map[string]int64{}
-	// 新→旧输出
-	out := make([]upstream.FirewallEvent, 0, len(events))
-	for i := len(events) - 1; i >= 0; i-- {
-		e := events[i]
+	for _, e := range all {
 		ruleCount[e.Rule]++
 		if time.Unix(e.At, 0).Format("2006-01-02") == today {
 			todayN++
 		}
-		out = append(out, e)
 	}
 	type rc struct {
 		Rule  string `json:"rule"`
@@ -680,13 +698,19 @@ func (a *App) FirewallStats() map[string]any {
 		rules = append(rules, rc{Rule: r, Count: n})
 	}
 	sort.Slice(rules, func(i, j int) bool { return rules[i].Count > rules[j].Count })
-	return map[string]any{
-		"enabled": api.FirewallEnabled(),
-		"total":   len(events),
-		"today":   todayN,
-		"events":  out,
-		"rules":   rules,
+
+	out := map[string]any{
+		"total":  len(all),
+		"today":  todayN,
+		"rules":  rules,
+		"events": []any{},
 	}
+	a.fwStatsMu.Lock()
+	a.fwStatsCache = out
+	a.fwStatsAt = time.Now()
+	a.fwStatsMu.Unlock()
+	out["enabled"] = enabledAPI.FirewallEnabled()
+	return out
 }
 
 // UsageStatsResult 用量统计聚合。
