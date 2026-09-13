@@ -109,6 +109,7 @@ type Client struct {
 	// ContentFirewall 开启后出站前做内容防火墙检查（firewall.go）。
 	// 关键词命中后若 Judge 可用，则交外部 LLM 判定；否则 fail-open 放行。
 	ContentFirewall bool
+	judgeMu         sync.RWMutex
 	Judge           JudgeConfig
 
 	fwMu   sync.Mutex      // 防火墙命中事件锁
@@ -376,9 +377,9 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 				log.Printf("FIREWALL uid=%s rule=%s match=%.120s -> observed (forwarded)", a.UID, rule, excerpt)
 				c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared, true)
 			} else if action == ActionBlock {
-				if c.Judge.Active() {
+				if jc := c.JudgeSnapshot(); jc.Active() {
 					text := extractMessageText(prepared)
-					v, jerr := callJudge(c.Judge, []string{FirewallKeyword(rule)}, []string{text})
+					v, jerr := callJudge(jc, []string{FirewallKeyword(rule)}, []string{text})
 					if jerr != nil {
 						log.Printf("FIREWALL uid=%s rule=%s judge failed (%v) -> fail-open", a.UID, rule, jerr)
 						c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared, true)

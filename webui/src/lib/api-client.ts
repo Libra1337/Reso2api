@@ -200,6 +200,14 @@ export const api = {
   configApiKey: (key: string) =>
     request<import("@/types").SimpleResult>("/config/api_key", { key }),
 
+  configJudge: (body: {
+    enabled: boolean;
+    base_url: string;
+    api_key: string;
+    model: string;
+    timeout_ms: number;
+  }) => request<import("@/types").SimpleResult>("/config/judge", body),
+
   configCheckinTimes: (times: string[]) =>
     request<import("@/types").SimpleResult>("/config/checkin_times", {
       times,

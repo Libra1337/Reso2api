@@ -73,6 +73,18 @@ func (c JudgeConfig) timeout() time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
+func (c *Client) JudgeSnapshot() JudgeConfig {
+	c.judgeMu.RLock()
+	defer c.judgeMu.RUnlock()
+	return c.Judge
+}
+
+func (c *Client) SetJudge(cfg JudgeConfig) {
+	c.judgeMu.Lock()
+	c.Judge = cfg
+	c.judgeMu.Unlock()
+}
+
 // JudgeVerdict 外部审查结论。
 type JudgeVerdict struct {
 	Category string

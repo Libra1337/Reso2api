@@ -46,6 +46,12 @@ export interface AppState {
   version: string;
   autostart: boolean;
   running: boolean;
+  judge_enabled: boolean;
+  judge_active: boolean;
+  judge_base_url: string;
+  judge_api_key: string;
+  judge_model: string;
+  judge_timeout_ms: number;
 }
 
 export interface LoginStartResult {

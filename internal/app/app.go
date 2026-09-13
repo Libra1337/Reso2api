@@ -1293,6 +1293,37 @@ func (a *App) SetAPIKey(key string) error {
 	return nil
 }
 
+// SetJudgeConfig 保存外部审查配置并热更新 WorkBuddy 出站判定器。
+func (a *App) SetJudgeConfig(enabled bool, baseURL, apiKey, model string, timeoutMS int) error {
+	baseURL = strings.TrimSpace(baseURL)
+	apiKey = strings.TrimSpace(apiKey)
+	model = strings.TrimSpace(model)
+	if timeoutMS <= 0 {
+		timeoutMS = 4000
+	}
+	a.mu.Lock()
+	a.cfg.Features.JudgeEnabled = enabled
+	a.cfg.Features.JudgeBaseURL = baseURL
+	a.cfg.Features.JudgeAPIKey = apiKey
+	a.cfg.Features.JudgeModel = model
+	a.cfg.Features.JudgeTimeoutMS = timeoutMS
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if rt := a.runtime(provider.WorkBuddy); rt != nil {
+		if c, ok := rt.Upstream.(*upstream.Client); ok {
+			c.SetJudge(upstream.JudgeConfig{
+				Enabled: enabled, BaseURL: baseURL, APIKey: apiKey, Model: model, TimeoutMS: timeoutMS,
+			})
+		}
+	}
+	log.Printf("外部审查已更新 enabled=%v active=%v model=%s", enabled,
+		upstream.JudgeConfig{Enabled: enabled, BaseURL: baseURL, APIKey: apiKey, Model: model}.Active(), model)
+	return nil
+}
+
 // SetAutostart 设置/取消开机自启。
 func (a *App) SetAutostart(on bool) error {
 	if err := platform.SetAutostart(on); err != nil {
@@ -1356,6 +1387,12 @@ type State struct {
 	Version        string        `json:"version"`
 	Autostart      bool          `json:"autostart"`
 	Running        bool          `json:"running"`
+	JudgeEnabled   bool          `json:"judge_enabled"`
+	JudgeActive    bool          `json:"judge_active"`
+	JudgeBaseURL   string        `json:"judge_base_url"`
+	JudgeAPIKey    string        `json:"judge_api_key"`
+	JudgeModel     string        `json:"judge_model"`
+	JudgeTimeoutMS int           `json:"judge_timeout_ms"`
 }
 
 // GetState 返回面板初始数据。
@@ -1371,7 +1408,20 @@ func (a *App) GetState() State {
 		Version:        Version,
 		Autostart:      a.AutostartEnabled(),
 		Running:        a.ServerRunning(),
+		JudgeEnabled:   a.cfg.Features.JudgeEnabled,
+		JudgeBaseURL:   a.cfg.Features.JudgeBaseURL,
+		JudgeAPIKey:    a.cfg.Features.JudgeAPIKey,
+		JudgeModel:     a.cfg.Features.JudgeModel,
+		JudgeTimeoutMS: a.cfg.Features.JudgeTimeoutMS,
 	}
+	jc := upstream.JudgeConfig{
+		Enabled:   st.JudgeEnabled,
+		BaseURL:   st.JudgeBaseURL,
+		APIKey:    st.JudgeAPIKey,
+		Model:     st.JudgeModel,
+		TimeoutMS: st.JudgeTimeoutMS,
+	}
+	st.JudgeActive = jc.Active()
 	st.Accounts = a.accountViews()
 	return st
 }
@@ -1877,6 +1927,21 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if err := a.SetListen(req.Host, req.Port); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	inner.HandleFunc("POST /api/config/judge", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Enabled   bool   `json:"enabled"`
+			BaseURL   string `json:"base_url"`
+			APIKey    string `json:"api_key"`
+			Model     string `json:"model"`
+			TimeoutMS int    `json:"timeout_ms"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetJudgeConfig(req.Enabled, req.BaseURL, req.APIKey, req.Model, req.TimeoutMS); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}

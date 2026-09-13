@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import {
   CalendarClock,
   CalendarCheck2,
@@ -12,6 +12,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  ShieldAlert,
   ShieldCheck,
   Trash2,
 } from "lucide-react"
@@ -346,6 +347,141 @@ function ScheduleCard({
   )
 }
 
+function JudgeCard({
+  data,
+  loading,
+  onChanged,
+}: {
+  data?: AppState
+  loading: boolean
+  onChanged: () => void
+}) {
+  const [enabled, setEnabled] = useState(false)
+  const [baseUrl, setBaseUrl] = useState("")
+  const [apiKey, setApiKey] = useState("")
+  const [model, setModel] = useState("")
+  const [timeoutMs, setTimeoutMs] = useState(4000)
+  const [showKey, setShowKey] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [hydrated, setHydrated] = useState(false)
+
+  useEffect(() => {
+    if (!data || hydrated) return
+    setEnabled(!!data.judge_enabled)
+    setBaseUrl(data.judge_base_url || "")
+    setApiKey(data.judge_api_key || "")
+    setModel(data.judge_model || "")
+    setTimeoutMs(data.judge_timeout_ms > 0 ? data.judge_timeout_ms : 4000)
+    setHydrated(true)
+  }, [data, hydrated])
+
+  const save = async () => {
+    setSaving(true)
+    setError(null)
+    try {
+      await api.configJudge({
+        enabled,
+        base_url: baseUrl.trim(),
+        api_key: apiKey.trim(),
+        model: model.trim(),
+        timeout_ms: timeoutMs,
+      })
+      onChanged()
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "保存失败")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Card className="border-border/60 shadow-sm">
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-sm font-medium">
+          <ShieldAlert className="size-4 text-primary" />
+          外部审查
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {loading && !hydrated ? (
+          <>
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
+          </>
+        ) : (
+          <>
+            <p className="text-xs text-muted-foreground">
+              关键词只做提示。真正拦不拦由外部 LLM 判定：porn / political 才拦截；
+              未启用、未配齐或审查失败一律放行。
+            </p>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={enabled}
+                onChange={(e) => setEnabled(e.target.checked)}
+              />
+              启用 LLM 审查
+              <span className="text-xs text-muted-foreground">
+                {data?.judge_active ? "当前生效" : "当前未生效"}
+              </span>
+            </label>
+            <Input
+              placeholder="审核 Base URL，例如 https://api.openai.com"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              className="font-mono text-xs"
+            />
+            <Input
+              placeholder="审核模型名"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className="font-mono text-xs"
+            />
+            <div className="flex items-center gap-1">
+              <Input
+                placeholder="审核 API Key"
+                type={showKey ? "text" : "password"}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                className="font-mono text-xs"
+              />
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setShowKey((v) => !v)}
+                aria-label={showKey ? "隐藏 Key" : "显示 Key"}
+              >
+                {showKey ? <EyeOff /> : <Eye />}
+              </Button>
+            </div>
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min={500}
+                step={500}
+                value={timeoutMs}
+                onChange={(e) => setTimeoutMs(Number(e.target.value) || 4000)}
+                className="w-32 font-mono text-xs"
+              />
+              <span className="text-xs text-muted-foreground">超时毫秒，超时放行</span>
+            </div>
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+            <Button size="sm" onClick={() => void save()} disabled={saving}>
+              {saving ? <LoadingSpinner size={14} className="mr-1.5" /> : null}
+              保存审查设置
+            </Button>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 function FeesCard({ onChanged }: { onChanged: () => void }) {
   const { data: fees, loading } = usePolling<FeesInfo>(api.fees, 300000)
   const [tab, setTab] = useState<string>("")
@@ -567,6 +703,14 @@ export default function ApiPage() {
             loading={loading}
             onChanged={() => {
               setNotice("调度策略已更新")
+              void refresh()
+            }}
+          />
+          <JudgeCard
+            data={data ?? undefined}
+            loading={loading}
+            onChanged={() => {
+              setNotice("外部审查设置已更新")
               void refresh()
             }}
           />
