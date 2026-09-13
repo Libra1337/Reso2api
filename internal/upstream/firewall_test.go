@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -146,5 +147,63 @@ func TestBlockObserveMatrix(t *testing.T) {
 		if _, _, action := FirewallCheck(b); action != "" {
 			t.Errorf("PASS expected [%s]: got %q", c, action)
 		}
+	}
+}
+
+func TestFirewallHitResponseUsesKeywordNotRuleName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"csam", "色情"},
+		{"nsfw-legalize", "nsfw"},
+		{"terror", "暴恐"},
+		{"色情", "色情"},
+		{"nsfw", "nsfw"},
+		{"unknown-internal", "违禁词"},
+		{"", "违禁词"},
+	}
+	for _, c := range cases {
+		raw := FirewallHitResponse(c.in)
+		var env struct {
+			Error struct {
+				Message string `json:"message"`
+				Type    string `json:"type"`
+				Code    string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &env); err != nil {
+			t.Fatalf("rule=%q not json: %v body=%s", c.in, err, raw)
+		}
+		want := "触发网站风控违禁词，无法调用模型：内容命中网关内容防火墙规则[" + c.want + "]，已被拦截。请修改内容后重试。"
+		if env.Error.Message != want {
+			t.Errorf("rule=%q message=%q want %q", c.in, env.Error.Message, want)
+		}
+		if env.Error.Code != "content_policy_violation" {
+			t.Errorf("code=%q", env.Error.Code)
+		}
+		body := string(raw)
+		for _, leak := range []string{"csam", "11140", "11128", "account", "cooling", "uid=", "nsfw-legalize"} {
+			if strings.Contains(strings.ToLower(body), leak) {
+				t.Errorf("must not leak %q in %s", leak, body)
+			}
+		}
+	}
+}
+
+func TestContentBlockKeyword(t *testing.T) {
+	cases := []struct{ body, want string }{
+		{`{"code":11140,"msg":"request illegal"}`, "违禁词"},
+		{`{"error":{"code":11128,"message":"content contains NSFW material"}}`, "nsfw"},
+		{`{"msg":"命中色情内容"}`, "色情"},
+		{"", "违禁词"},
+	}
+	for _, c := range cases {
+		if got := ContentBlockKeyword(c.body); got != c.want {
+			t.Errorf("ContentBlockKeyword(%q)=%q want %q", c.body, got, c.want)
+		}
+	}
+	if !IsContentPolicyBlock(`{"code":11140}`) || !IsContentPolicyBlock(`{"code":11128}`) {
+		t.Error("IsContentPolicyBlock should match 11140/11128")
+	}
+	if IsContentPolicyBlock(`{"code":40001}`) {
+		t.Error("plain 400 must not be treated as content policy")
 	}
 }

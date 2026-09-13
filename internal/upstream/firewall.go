@@ -12,6 +12,8 @@
 package upstream
 
 import (
+	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -202,12 +204,102 @@ func extractMessageText(body []byte) string {
 	return sb.String()
 }
 
+// firewallClientMsg 返回给调用方 / 中转站的固定文案。
+// [关键词] 填分类词（色情 / nsfw / 暴恐 等），绝不填内部规则名、业务 code、账号。
+const firewallClientMsg = "触发网站风控违禁词，无法调用模型：内容命中网关内容防火墙规则[%s]，已被拦截。请修改内容后重试。"
+
+const firewallFallbackKeyword = "违禁词"
+
+// firewallRuleKeywords 把内部规则名映射成可展示的分类词。
+var firewallRuleKeywords = map[string]string{
+	"csam":               "色情",
+	"minor-adult-claim":  "色情",
+	"minor-nsfw-cooccur": "色情",
+	"nsfw-legalize":      "nsfw",
+	"explicit-allow":     "nsfw",
+	"nude-deepfake":      "nsfw",
+	"terror":             "暴恐",
+	"weapon-cbrn":        "暴力",
+	"drug-synthesis":     "毒品",
+	"malware":            "恶意软件",
+	"self-harm":          "自杀",
+	"politics":           "政治",
+	"bypass-review":      "违禁词",
+	"bypass-review-en":   "违禁词",
+	"no-safety-claim":    "违禁词",
+}
+
+// contentBlockKeywords 从上游审核文案抽出分类词（大小写不敏感，按优先级）。
+var contentBlockKeywords = []string{
+	"色情", "porn", "nsfw", "adult",
+	"暴恐", "terror",
+	"暴力", "violence",
+	"政治", "politics",
+	"赌博", "gambling",
+	"毒品", "drug",
+	"违禁词",
+}
+
+// FirewallKeyword 把内部规则名或已是展示词的标签收成客户端关键词。
+// 未知内部名（csam / xxx-yyy）一律回「违禁词」，不得出站。
+func FirewallKeyword(rule string) string {
+	rule = strings.TrimSpace(rule)
+	if rule == "" {
+		return firewallFallbackKeyword
+	}
+	if kw, ok := firewallRuleKeywords[rule]; ok {
+		return kw
+	}
+	for _, kw := range contentBlockKeywords {
+		if strings.EqualFold(rule, kw) {
+			return kw
+		}
+	}
+	return firewallFallbackKeyword
+}
+
+// ContentBlockKeyword 从上游 11128/11140 等审核 body 抽出分类词；抽不到则「违禁词」。
+// 不返回业务 code、账号、冷却语义。
+func ContentBlockKeyword(body string) string {
+	text := body
+	var env struct {
+		Msg     string `json:"msg"`
+		Message string `json:"message"`
+		Error   struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(body), &env) == nil {
+		switch {
+		case strings.TrimSpace(env.Error.Message) != "":
+			text = env.Error.Message
+		case strings.TrimSpace(env.Msg) != "":
+			text = env.Msg
+		case strings.TrimSpace(env.Message) != "":
+			text = env.Message
+		}
+	}
+	lower := strings.ToLower(text)
+	for _, kw := range contentBlockKeywords {
+		if strings.Contains(lower, strings.ToLower(kw)) {
+			return kw
+		}
+	}
+	return firewallFallbackKeyword
+}
+
+// IsContentPolicyBlock 上游内容审核拦截（11140 安全审核 / 11128 指纹策略）。
+func IsContentPolicyBlock(body string) bool {
+	return strings.Contains(body, "11140") || strings.Contains(body, "11128")
+}
+
 // FirewallHitResponse 防火墙拦截时返回给客户端的错误体（403）。
 // 形状对齐 OpenAI 内容违规错误（type=invalid_request_error /
 // code=content_policy_violation）：中转站对该标准形状原样透传 message，
-// 不会改写成"无可用渠道/模型不存在"之类的笼统报错。
+// 不会改写成"无可用渠道/模型不存在"或账号冷却之类的笼统报错。
 func FirewallHitResponse(rule string) []byte {
-	return []byte(`{"error":{"message":"触发网站风控违禁词，无法调用模型：内容命中网关内容防火墙规则 [` + rule + `]，该类内容已违规。请修改内容后重试。","type":"invalid_request_error","param":null,"code":"content_policy_violation"}}`)
+	kw := FirewallKeyword(rule)
+	return []byte(`{"error":{"message":"` + fmt.Sprintf(firewallClientMsg, kw) + `","type":"invalid_request_error","param":null,"code":"content_policy_violation"}}`)
 }
 
 // FirewallEvent 一次防火墙拦截记录（内存环形，面板展示用）。

@@ -20,6 +20,7 @@ import (
 	"wild-work/internal/auth"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
+	"wild-work/internal/upstream"
 )
 
 // Runtime 是一个平台的一组运行时资源：pool + upstream + 静态模型兜底。
@@ -575,17 +576,25 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 				}
 			case provider.ErrServer:
 				rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
-			default: // ErrClient / ErrNotFound：请求本身被上游拒绝，原样透传
+			default: // ErrClient / ErrNotFound：请求本身被上游拒绝
 				// 11140 内容审核熔断：短窗多次说明持续发违规内容，停号止损防整号拉黑
 				if status == http.StatusForbidden && strings.Contains(string(respBody), "11140") {
 					if rt.Pool.NoteContentBlock(acct.UID) {
 						log.Printf("content-block circuit breaker: disable platform=%s uid=%s (11140 x3/h)", rt.Kind, acct.UID)
 					}
 				}
+				out := respBody
+				outStatus := status
+				if upstream.IsContentPolicyBlock(string(respBody)) {
+					// 内容审核：回网关防火墙文案，不透传上游 body（账号/业务 code）。
+					kw := upstream.ContentBlockKeyword(string(respBody))
+					out = upstream.FirewallHitResponse(kw)
+					outStatus = http.StatusForbidden
+				}
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(status)
-				_, _ = w.Write(respBody)
-				h.finishReqLog(t0, model, rt.Kind.String(), acct.UID, status, false, 0, nil, body)
+				w.WriteHeader(outStatus)
+				_, _ = w.Write(out)
+				h.finishReqLog(t0, model, rt.Kind.String(), acct.UID, outStatus, false, 0, nil, body)
 				return nil, "", false
 			}
 			lastErr = &provider.Error{Kind: kind, Status: status, Msg: string(respBody)}
@@ -624,11 +633,16 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		return brc, acct.UID, true
 	}
 	if lastBody != nil {
-		// 轮转耗尽且最后一次是上游侧错误：按原状态透传（比笼统 503 更利于客户端/中转站判断）
+		out := lastBody
+		outStatus := lastStatus
+		if upstream.IsContentPolicyBlock(string(lastBody)) {
+			out = upstream.FirewallHitResponse(upstream.ContentBlockKeyword(string(lastBody)))
+			outStatus = http.StatusForbidden
+		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(lastStatus)
-		_, _ = w.Write(lastBody)
-		h.finishReqLog(t0, model, rt.Kind.String(), "", lastStatus, false, 0, nil, body)
+		w.WriteHeader(outStatus)
+		_, _ = w.Write(out)
+		h.finishReqLog(t0, model, rt.Kind.String(), "", outStatus, false, 0, nil, body)
 		return nil, "", false
 	}
 	msg := "all accounts unavailable (cooling/disabled)"
