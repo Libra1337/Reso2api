@@ -86,13 +86,16 @@ func (e *entry) healthy(now time.Time) bool {
 
 // stateFile 持久化格式。
 type accountState struct {
-	Credits        int64     `json:"credits"`
-	Disabled       bool      `json:"disabled"`
-	Reason         string    `json:"reason,omitempty"`
-	Until          time.Time `json:"until,omitempty"`
-	LastCheckinOK  bool      `json:"last_checkin_ok,omitempty"`
-	LastCheckinAt  time.Time `json:"last_checkin_at,omitempty"`
-	LastCheckinMsg string    `json:"last_checkin_msg,omitempty"`
+	Credits  int64     `json:"credits"`
+	Disabled bool      `json:"disabled"`
+	Reason   string    `json:"reason,omitempty"`
+	Until    time.Time `json:"until,omitempty"`
+	// ModelCool 模型级冷却（6004）：model → 重置墙钟。持久化避免重启后
+	// 已知限额信息丢失、反复重撞 429 才重建。
+	ModelCool      map[string]time.Time `json:"model_cool,omitempty"`
+	LastCheckinOK  bool                 `json:"last_checkin_ok,omitempty"`
+	LastCheckinAt  time.Time            `json:"last_checkin_at,omitempty"`
+	LastCheckinMsg string               `json:"last_checkin_msg,omitempty"`
 }
 
 type stateFile struct {
@@ -313,6 +316,7 @@ func (p *Pool) CooldownSoftForModel(uid string, resetAt time.Time, model, reason
 	}
 	e.modelCool[model] = resetAt
 	e.reason = reason
+	p.saveLocked()
 }
 
 // CooledForModel 报告账号当前是否处于指定模型的冷却期（6004 语义）。
@@ -339,8 +343,8 @@ type ModelCoolEntry struct {
 // ModelCoolSummary 模型维度的限流聚合（面板「模型限流」页数据源）。
 type ModelCoolSummary struct {
 	Model     string           `json:"model"`
-	Cooled    []ModelCoolEntry `json:"cooled"`  // 被限账号（按重置时间升序）
-	Total     int              `json:"total"`   // 未禁用账号总数
+	Cooled    []ModelCoolEntry `json:"cooled"`    // 被限账号（按重置时间升序）
+	Total     int              `json:"total"`     // 未禁用账号总数
 	Available int              `json:"available"` // 当前可用的账号数
 }
 
@@ -481,13 +485,21 @@ func (p *Pool) load() {
 	if json.Unmarshal(raw, &sf) != nil {
 		return
 	}
+	now := time.Now()
 	for uid, s := range sf.Accounts {
+		modelCool := map[string]time.Time{}
+		for m, until := range s.ModelCool {
+			if now.Before(until) {
+				modelCool[m] = until // 过期项不恢复
+			}
+		}
 		p.byUID[uid] = &entry{
 			a:              &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
 			credits:        s.Credits,
 			disabled:       s.Disabled,
 			reason:         s.Reason,
 			until:          s.Until,
+			modelCool:      modelCool,
 			lastCheckinOK:  s.LastCheckinOK,
 			lastCheckinAt:  s.LastCheckinAt,
 			lastCheckinMsg: s.LastCheckinMsg,
