@@ -117,7 +117,12 @@ func (s *reqLogStore) add(l ReqLog) {
 }
 
 // SetBodiesDir 设置请求体存档目录（main 启动时调用）。
-func (s *reqLogStore) SetBodiesDir(dir string) { s.bodies = dir }
+func (s *reqLogStore) SetBodiesDir(dir string) {
+	s.bodies = dir
+	if dir != "" {
+		_ = os.MkdirAll(dir, 0o700)
+	}
+}
 
 // SaveBodyArchive 采样存档请求体（10% 概率；成功返回文件名）。
 // 存档永不删除——"请求日志永久保留且可回看完整内容"的一部分。

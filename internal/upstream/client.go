@@ -370,9 +370,9 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	prepared, degraded := c.applyPrompt(PrepareBodyOptWithEfforts(body, c.SanitizeFingerprints, c.effortsSnapshot()))
 	// 内容防火墙：高危内容不出网关（上游拉黑是整号永久的，代价不可逆）。
 	if c.ContentFirewall {
-		if rule, hit := FirewallCheck(prepared); hit {
-			log.Printf("FIREWALL uid=%s rule=%s -> blocked (content not sent upstream)", a.UID, rule)
-			c.recordFirewallHit(a, rule, extractModel(prepared), prepared)
+		if rule, excerpt, hit := FirewallCheck(prepared); hit {
+			log.Printf("FIREWALL uid=%s rule=%s match=%.120s -> blocked", a.UID, rule, excerpt)
+			c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared)
 			return nil, http.StatusForbidden, FirewallHitResponse(rule), nil
 		}
 	}

@@ -52,7 +52,9 @@ var firewallRules = []firewallRule{
 	{Name: "explicit-allow", Pattern: regexp.MustCompile(
 		`(?i)允许出现?(暴力|色情|性|nsfw)`)},
 	{Name: "bypass-review", Pattern: regexp.MustCompile(
-		`(?i)(无视|忽略|绕过|不要遵守|ignore|bypass|disregard)[^\n]{0,40}(安全|审核|内容审查|过滤|限制|guideline|safety|restriction|policy)`)},
+		`(?i)(无视|忽略|绕过|不要遵守)[^\n]{0,40}(安全|审核|内容审查|过滤|限制)`)},
+	{Name: "bypass-review-en", Pattern: regexp.MustCompile(
+		`(?i)\b(ignore|disregard|bypass)\s+(all\s+|any\s+|the\s+|your\s+|their\s+|its\s+)*(previous\s+|prior\s+|above\s+|earlier\s+)*(user\s+|system\s+|safety\s+|content\s+|security\s+)*(instructions?|prompts?|rules|guardrails|guidelines|policies?|restrictions?|filters?|safety)`)},
 	{Name: "no-safety-claim", Pattern: regexp.MustCompile(
 		`(?i)(没有|不带|do not have|don't have|without|any)\s{0,3}(任何)?\s{0,3}(安全(?:限制|准则|指南|约束)?|safety|guideline|restriction)`)},
 	// ── B 级：主题词 × 意图动词共现 ────────────────────────────
@@ -87,15 +89,16 @@ var nsfwAllowContext = regexp.MustCompile(
 var nsfwDenyContext = regexp.MustCompile(
 	`(?i)((不发|不会发|拒绝|禁止|不允许|不让发|检测|过滤|识别|审核|防护|保护|拦截)[^\n]{0,14}(nsfw|r18|色情|涩图|性描写))|(((nsfw|r18|色情|涩图|性描写)[^\n]{0,10}(绝对)?不发))`)
 
-// FirewallCheck 检查出站请求体文本，命中返回规则名。
+// FirewallCheck 检查出站请求体文本，命中返回规则名与命中片段
+// （动词与政策词前后各带 40 字上下文，供面板展示"为什么命中"）。
 // 只扫描 messages 的文本内容（system/user/assistant），不碰工具定义。
-func FirewallCheck(prepared []byte) (string, bool) {
+func FirewallCheck(prepared []byte) (string, string, bool) {
 	if len(prepared) == 0 {
-		return "", false
+		return "", "", false
 	}
 	text := extractMessageText(prepared)
 	if text == "" {
-		return "", false
+		return "", "", false
 	}
 	for _, r := range firewallRules {
 		switch {
@@ -103,20 +106,74 @@ func FirewallCheck(prepared []byte) (string, bool) {
 			// 共现兜底：未成年信号 + NSFW"允许/生成"语境同时出现才拦。
 			// 拒绝型人设（"NSFW 的图我绝对不发"）与安全讨论不命中。
 			if r.Pattern.MatchString(text) && nsfwSignals.MatchString(text) && nsfwAllowContext.MatchString(text) && !nsfwDenyContext.MatchString(text) {
-				return r.Name, true
+				return r.Name, excerptAround(text, r.Pattern), true
 			}
 		case r.Pair != nil:
 			// B 级：主题词与意图动词都命中才拦（防御研究/游戏编程不误杀）
-			if r.Pattern.MatchString(text) && r.Pair.MatchString(text) {
-				return r.Name, true
+			loc := r.Pattern.FindStringIndex(text)
+			ploc := r.Pair.FindStringIndex(text)
+			if loc != nil && ploc != nil {
+				lo, hi := loc[0], ploc[1]
+				if ploc[0] < lo {
+					lo, hi = ploc[0], loc[1]
+				}
+				return r.Name, excerptAt(text, lo, hi), true
 			}
+		case r.Name == "bypass-review-en":
+			// 英文越狱短语：命令式（ignore all previous instructions）才算。
+			// 前置情态/否定/关系词（may/might/not/that...）= 描述性散文
+			//（安全政策文档、监控提示词里"agents that ignore policy"类），放行。
+			loc := r.Pattern.FindStringIndex(text)
+			if loc == nil {
+				continue
+			}
+			if bypassDescriptionVeto(text, loc[0]) {
+				continue
+			}
+			return r.Name, excerptAt(text, loc[0], loc[1]), true
 		default:
-			if r.Pattern.MatchString(text) {
-				return r.Name, true
+			if loc := r.Pattern.FindStringIndex(text); loc != nil {
+				return r.Name, excerptAt(text, loc[0], loc[1]), true
 			}
 		}
 	}
-	return "", false
+	return "", "", false
+}
+
+// excerptAround 取规则首个命中点前后各 40 字。
+func excerptAround(text string, re *regexp.Regexp) string {
+	loc := re.FindStringIndex(text)
+	if loc == nil {
+		return ""
+	}
+	return excerptAt(text, loc[0], loc[1])
+}
+
+// excerptAt 取 [lo,hi) 前后各 40 字、压平换行。
+func excerptAt(text string, lo, hi int) string {
+	s := lo - 40
+	if s < 0 {
+		s = 0
+	}
+	e := hi + 40
+	if e > len(text) {
+		e = len(text)
+	}
+	out := strings.ReplaceAll(text[s:e], "\n", " ")
+	return strings.TrimSpace(out)
+}
+
+// bypassDescriptionVeto 命中动词前 60 字内出现情态/否定/关系词 =
+// 描述性引用而非命令（安全政策文档、"agents that ignore policy"类）。
+var bypassVetoRe = regexp.MustCompile(
+	`(?i)(may|might|could|won't|cannot|can't|never|not|don't|do not|doesn't|does not|without|that|which|nor|or|and)(\s+\w+){0,2}\s*$`)
+
+func bypassDescriptionVeto(text string, start int) bool {
+	lo := start - 60
+	if lo < 0 {
+		lo = 0
+	}
+	return bypassVetoRe.MatchString(text[lo:start])
 }
 
 // extractMessageText 从请求体提取 messages 的纯文本内容（拼接各消息字符串字段）。
@@ -162,20 +219,18 @@ type FirewallEvent struct {
 	UID     string `json:"uid,omitempty"`
 	Model   string `json:"model,omitempty"`
 	Snippet string `json:"snippet,omitempty"` // 列表摘要（前 80 字符）
-	Content string `json:"content,omitempty"` // 完整内容（截 4000 字，弹窗展示）
+	Content string `json:"content,omitempty"` // 完整内容（全文，不截断）
+	Match   string `json:"match,omitempty"`   // 命中片段（为什么命中）
 }
 
 const firewallEventCap = 500
 
-// recordFirewallHit 记录一次拦截（环形截断）。
-func (c *Client) recordFirewallHit(a *auth.Auth, rule, model string, prepared []byte) {
+// recordFirewallHit 记录一次拦截（内存环形 + 永久 jsonl，内容不截断）。
+func (c *Client) recordFirewallHit(a *auth.Auth, rule, model, matchExcerpt string, prepared []byte) {
 	content := extractMessageText(prepared)
 	snippet := strings.ReplaceAll(content, "\n", " ")
 	if r := []rune(snippet); len(r) > 80 {
 		snippet = string(r[:80]) + "…"
-	}
-	if r := []rune(content); len(r) > 4000 {
-		content = string(r[:4000]) + "\n…（内容过长截断）"
 	}
 	uid := ""
 	if a != nil {
@@ -183,7 +238,7 @@ func (c *Client) recordFirewallHit(a *auth.Auth, rule, model string, prepared []
 	}
 	ev := FirewallEvent{
 		At: time.Now().Unix(), Rule: rule, UID: uid, Model: model,
-		Snippet: snippet, Content: content,
+		Snippet: snippet, Content: content, Match: matchExcerpt,
 	}
 	c.fwMu.Lock()
 	c.fwHits = append(c.fwHits, ev)
