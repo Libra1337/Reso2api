@@ -75,7 +75,17 @@ var firewallRules = []firewallRule{
 		`(?i)(1[0-9]\s*岁|十五岁|十六岁|十七岁|loli|萝莉|幼女|女小学生)`)},
 }
 
-var nsfwSignals = regexp.MustCompile(`(?i)\b(nsfw|r18|色情|淫秽|涩图|性描写|露骨)\b`)
+var nsfwSignals = regexp.MustCompile(`(?i)(nsfw|r18|色情|淫秽|涩图|性描写|露骨)`)
+
+// nsfwAllowContext NSFW 的"允许/生成"意图语境（cooccur 兜底要求命中）：
+// 动词主动请求/生产 NSFW 内容才算。
+var nsfwAllowContext = regexp.MustCompile(
+	`(?i)(可以|允许|要|画|生成|制作|来点|想要|发[一两张个]?|写)[^\n]{0,12}(nsfw|r18|色情|涩图|性描写)`)
+
+// nsfwDenyContext NSFW 的"拒绝/防护"语境（命中则不拦）：拒绝型人设与
+// 安全防护讨论（检测/过滤/审核 NSFW）都属安全语境。
+var nsfwDenyContext = regexp.MustCompile(
+	`(?i)((不发|不会发|拒绝|禁止|不允许|不让发|检测|过滤|识别|审核|防护|保护|拦截)[^\n]{0,14}(nsfw|r18|色情|涩图|性描写))|(((nsfw|r18|色情|涩图|性描写)[^\n]{0,10}(绝对)?不发))`)
 
 // FirewallCheck 检查出站请求体文本，命中返回规则名。
 // 只扫描 messages 的文本内容（system/user/assistant），不碰工具定义。
@@ -90,8 +100,9 @@ func FirewallCheck(prepared []byte) (string, bool) {
 	for _, r := range firewallRules {
 		switch {
 		case r.Name == "minor-nsfw-cooccur":
-			// 共现兜底：未成年信号 + NSFW 信号同时出现才拦
-			if r.Pattern.MatchString(text) && nsfwSignals.MatchString(text) {
+			// 共现兜底：未成年信号 + NSFW"允许/生成"语境同时出现才拦。
+			// 拒绝型人设（"NSFW 的图我绝对不发"）与安全讨论不命中。
+			if r.Pattern.MatchString(text) && nsfwSignals.MatchString(text) && nsfwAllowContext.MatchString(text) && !nsfwDenyContext.MatchString(text) {
 				return r.Name, true
 			}
 		case r.Pair != nil:
