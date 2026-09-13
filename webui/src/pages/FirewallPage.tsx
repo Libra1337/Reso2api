@@ -106,8 +106,8 @@ export default function FirewallPage() {
             内容防火墙
           </h2>
           <p className="text-xs text-muted-foreground">
-            违禁内容在出网关前拦截（对齐主流大模型平台政策红线）· 命中即 403
-            无旁路 · 30 秒自动刷新 · 事件保留最近 500 条
+            关键词命中后交外部审查；拦截详情含触发词、审查看法、入口、模型与账号
+            · 30 秒自动刷新 · 事件永久保留
           </p>
         </div>
         <Button
@@ -265,7 +265,7 @@ export default function FirewallPage() {
                           {e.snippet || "（无文本内容）"}
                         </span>
                         <span className="mt-0.5 block font-mono text-[10px] text-muted-foreground/70">
-                          {e.model || "-"} · {(e.uid || "").slice(0, 8)}
+                          {e.keyword || e.rule} · {e.verdict || (e.observe ? "observe" : "block")} · {e.model || "-"} · {e.nick || (e.uid || "").slice(0, 8) || "-"}
                         </span>
                       </span>
                     </div>
@@ -331,12 +331,50 @@ export default function FirewallPage() {
             </DialogTitle>
             {detailEvent && (
               <DialogDescription className="font-mono text-[11px]">
-                {fmtTime(detailEvent.at)} · {detailEvent.model || "-"} ·{" "}
-                {(detailEvent.uid || "").slice(0, 8)}
+                {fmtTime(detailEvent.at)}
               </DialogDescription>
             )}
           </DialogHeader>
-          <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted/50 p-3 font-mono text-xs leading-relaxed">
+          {detailEvent && (
+            <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+              <div className="rounded-md bg-muted/40 px-2.5 py-2">
+                <div className="text-[10px] text-muted-foreground">触发词</div>
+                <div className="mt-0.5 font-medium">{detailEvent.keyword || detailEvent.rule || "-"}</div>
+              </div>
+              <div className="rounded-md bg-muted/40 px-2.5 py-2">
+                <div className="text-[10px] text-muted-foreground">外部审查</div>
+                <div className="mt-0.5 font-medium">{detailEvent.verdict || (detailEvent.observe ? "observe" : "block")}</div>
+              </div>
+              <div className="rounded-md bg-muted/40 px-2.5 py-2">
+                <div className="text-[10px] text-muted-foreground">入口</div>
+                <div className="mt-0.5 font-medium">{detailEvent.entry || "chat"}</div>
+              </div>
+              <div className="rounded-md bg-muted/40 px-2.5 py-2">
+                <div className="text-[10px] text-muted-foreground">调用模型</div>
+                <div className="mt-0.5 font-mono">{detailEvent.model || "-"}</div>
+              </div>
+              <div className="rounded-md bg-muted/40 px-2.5 py-2">
+                <div className="text-[10px] text-muted-foreground">审查模型</div>
+                <div className="mt-0.5 font-mono">{detailEvent.judge || "-"}</div>
+              </div>
+              <div className="rounded-md bg-muted/40 px-2.5 py-2">
+                <div className="text-[10px] text-muted-foreground">调用账户</div>
+                <div className="mt-0.5">
+                  {detailEvent.nick || "-"}
+                  <span className="ml-1 font-mono text-[10px] text-muted-foreground">
+                    {(detailEvent.uid || "").slice(0, 8) || "-"}
+                  </span>
+                </div>
+              </div>
+              {detailEvent.reason ? (
+                <div className="col-span-2 rounded-md bg-muted/40 px-2.5 py-2 sm:col-span-3">
+                  <div className="text-[10px] text-muted-foreground">审查看法</div>
+                  <div className="mt-0.5 leading-relaxed">{detailEvent.reason}</div>
+                </div>
+              ) : null}
+            </div>
+          )}
+          <pre className="max-h-[46vh] overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted/50 p-3 font-mono text-xs leading-relaxed">
             {detailEvent?.content || detailEvent?.snippet || "（无文本内容）"}
           </pre>
         </DialogContent>

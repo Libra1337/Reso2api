@@ -371,10 +371,17 @@ export interface FirewallEvent {
   at: number;
   rule: string;
   uid?: string;
+  nick?: string;
   model?: string;
   snippet?: string;
   content?: string;
+  match?: string;
   observe?: boolean;
+  keyword?: string;
+  verdict?: string;
+  reason?: string;
+  entry?: string;
+  judge?: string;
 }
 
 export interface FirewallStatsResult {

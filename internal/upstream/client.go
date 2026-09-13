@@ -373,27 +373,39 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	// 内容防火墙：高危内容不出网关（上游拉黑是整号永久的，代价不可逆）。
 	if c.ContentFirewall {
 		if rule, excerpt, action := FirewallCheck(prepared); action != "" {
+			model := extractModel(prepared)
+			kw := FirewallKeyword(rule)
 			if action == ActionObserve {
 				log.Printf("FIREWALL uid=%s rule=%s match=%.120s -> observed (forwarded)", a.UID, rule, excerpt)
-				c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared, true)
+				c.recordFirewallHitMeta(a, rule, model, excerpt, prepared, true, FirewallHitMeta{
+					Keyword: kw, Verdict: "observe", Entry: "chat",
+				})
 			} else if action == ActionBlock {
 				if jc := c.JudgeSnapshot(); jc.Active() {
 					text := extractMessageText(prepared)
-					v, jerr := callJudge(jc, []string{FirewallKeyword(rule)}, []string{text})
+					v, jerr := callJudge(jc, []string{kw}, []string{text})
 					if jerr != nil {
 						log.Printf("FIREWALL uid=%s rule=%s judge failed (%v) -> fail-open", a.UID, rule, jerr)
-						c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared, true)
+						c.recordFirewallHitMeta(a, rule, model, excerpt, prepared, true, FirewallHitMeta{
+							Keyword: kw, Verdict: "fail-open", Reason: jerr.Error(), Entry: "chat", Judge: jc.Model,
+						})
 					} else if v.Blocks() {
 						log.Printf("FIREWALL uid=%s rule=%s judge=%s reason=%.120s -> blocked", a.UID, rule, v.Category, v.Reason)
-						c.recordFirewallHit(a, v.Keyword(), extractModel(prepared), excerpt, prepared, false)
+						c.recordFirewallHitMeta(a, v.Keyword(), model, excerpt, prepared, false, FirewallHitMeta{
+							Keyword: kw, Verdict: v.Category, Reason: v.Reason, Entry: "chat", Judge: jc.Model,
+						})
 						return nil, http.StatusForbidden, FirewallHitResponse(v.Keyword()), nil
 					} else {
 						log.Printf("FIREWALL uid=%s rule=%s judge=%s -> marked (forwarded)", a.UID, rule, v.Category)
-						c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared, true)
+						c.recordFirewallHitMeta(a, rule, model, excerpt, prepared, true, FirewallHitMeta{
+							Keyword: kw, Verdict: v.Category, Reason: v.Reason, Entry: "chat", Judge: jc.Model,
+						})
 					}
 				} else {
 					log.Printf("FIREWALL uid=%s rule=%s match=%.120s -> fail-open (judge inactive)", a.UID, rule, excerpt)
-					c.recordFirewallHit(a, rule, extractModel(prepared), excerpt, prepared, true)
+					c.recordFirewallHitMeta(a, rule, model, excerpt, prepared, true, FirewallHitMeta{
+						Keyword: kw, Verdict: "fail-open", Reason: "审查未启用或未配齐", Entry: "chat",
+					})
 				}
 			}
 		}

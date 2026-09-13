@@ -307,29 +307,53 @@ type FirewallEvent struct {
 	At      int64  `json:"at"` // Unix 秒
 	Rule    string `json:"rule"`
 	UID     string `json:"uid,omitempty"`
+	Nick    string `json:"nick,omitempty"`
 	Model   string `json:"model,omitempty"`
-	Snippet string `json:"snippet,omitempty"` // 列表摘要（前 80 字符）
-	Content string `json:"content,omitempty"` // 完整内容（全文，不截断）
-	Match   string `json:"match,omitempty"`   // 命中片段（为什么命中）
-	Observe bool   `json:"observe,omitempty"` // true = 仅标记（请求已放行）
+	Snippet string `json:"snippet,omitempty"`
+	Content string `json:"content,omitempty"`
+	Match   string `json:"match,omitempty"`
+	Observe bool   `json:"observe,omitempty"`
+	Keyword string `json:"keyword,omitempty"`
+	Verdict string `json:"verdict,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Entry   string `json:"entry,omitempty"`
+	Judge   string `json:"judge,omitempty"`
+}
+
+// FirewallHitMeta 外部审查附加信息。
+type FirewallHitMeta struct {
+	Keyword string
+	Verdict string
+	Reason  string
+	Entry   string
+	Judge   string
 }
 
 const firewallEventCap = 500
 
-// recordFirewallHit 记录一次拦截（内存环形 + 永久 jsonl，内容不截断）。
 func (c *Client) recordFirewallHit(a *auth.Auth, rule, model, matchExcerpt string, prepared []byte, observe bool) {
+	c.recordFirewallHitMeta(a, rule, model, matchExcerpt, prepared, observe, FirewallHitMeta{Entry: "chat"})
+}
+
+func (c *Client) recordFirewallHitMeta(a *auth.Auth, rule, model, matchExcerpt string, prepared []byte, observe bool, meta FirewallHitMeta) {
 	content := extractMessageText(prepared)
 	snippet := strings.ReplaceAll(content, "\n", " ")
 	if r := []rune(snippet); len(r) > 80 {
 		snippet = string(r[:80]) + "…"
 	}
-	uid := ""
+	uid, nick := "", ""
 	if a != nil {
 		uid = a.UID
+		nick = a.Nickname
+	}
+	if meta.Entry == "" {
+		meta.Entry = "chat"
 	}
 	ev := FirewallEvent{
-		At: time.Now().Unix(), Rule: rule, UID: uid, Model: model,
+		At: time.Now().Unix(), Rule: rule, UID: uid, Nick: nick, Model: model,
 		Snippet: snippet, Content: content, Match: matchExcerpt, Observe: observe,
+		Keyword: meta.Keyword, Verdict: meta.Verdict, Reason: meta.Reason,
+		Entry: meta.Entry, Judge: meta.Judge,
 	}
 	c.fwMu.Lock()
 	c.fwHits = append(c.fwHits, ev)
@@ -337,7 +361,7 @@ func (c *Client) recordFirewallHit(a *auth.Auth, rule, model, matchExcerpt strin
 		c.fwHits = c.fwHits[len(c.fwHits)-firewallEventCap:]
 	}
 	c.fwMu.Unlock()
-	appendFirewallLog(ev) // 永久落盘（永不删除）
+	appendFirewallLog(ev)
 }
 
 // FirewallEvents 返回命中事件（旧→新）副本。
