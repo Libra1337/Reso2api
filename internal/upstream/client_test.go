@@ -290,24 +290,5 @@ func TestChatStreamPlain400NoRetry(t *testing.T) {
 	}
 }
 
-// 11140（内容安全审核，403）同样触发中性提示词重试。
-func TestChatStreamContentBlocked11140(t *testing.T) {
-	var calls int64
-	c := testClient(func(r *http.Request) (*http.Response, error) {
-		atomic.AddInt64(&calls, 1)
-		raw, _ := io.ReadAll(r.Body)
-		if strings.Contains(string(raw), "CLI template") {
-			return textResp(403, `{"code":11140,"msg":"request illegal","displayMsg":{"zh":"内容未通过安全审核"}}`), nil
-		}
-		return textResp(200, "data: [DONE]\n\n"), nil
-	})
-	rc, status, _, err := c.ChatStream(&auth.Auth{AccessToken: "at", UID: "u1"},
-		[]byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"system","content":"CLI template"},{"role":"user","content":"hi"}]}`))
-	if err != nil || status != 200 {
-		t.Fatalf("status=%d err=%v", status, err)
-	}
-	rc.Close()
-	if n := atomic.LoadInt64(&calls); n != 2 {
-		t.Fatalf("calls=%d want 2 (degraded retry)", n)
-	}
-}
+// 11140（内容安全审核，403）：换中性 system 无效（实测降级提示词下仍被拦），
+// 已改透传策略，断言见 TestChatStreamSafetyBlocked11140Passthrough。

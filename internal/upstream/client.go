@@ -315,11 +315,17 @@ func (c *Client) degradeTrigger() {
 	c.degradeMu.Unlock()
 }
 
-// isContentBlocked 上游内容拦截类错误：11128（指纹误报拦截）与
-// 11140（内容安全审核 "request illegal"）。两者都值得换中性 system 重试一次——
-// system 模板句参与审核判定，中性化后大量"误杀"请求可过。
-func isContentBlocked(body []byte) bool {
-	return strings.Contains(string(body), "11128") || strings.Contains(string(body), "11140")
+// isFingerprintBlock 11128：指纹误报拦截（system 模板句参与判定），
+// 换中性 system 重试有效，且值得进入降级窗口。
+func isFingerprintBlock(body []byte) bool {
+	return strings.Contains(string(body), "11128")
+}
+
+// isSafetyBlock 11140：内容安全审核（"request illegal"）——用户/对话内容
+// 本身触发，换 system 无效（实测：降级提示词下仍被拦）。不重试、不触发
+// 降级窗口，直接透传让客户端自知；降级窗口若因此触发只会污染无关流量。
+func isSafetyBlock(body []byte) bool {
+	return strings.Contains(string(body), "11140")
 }
 
 // applyPrompt 按模式做出站前系统提示词改写（返回改写后的 body 与是否已降级）。
@@ -338,17 +344,22 @@ func (c *Client) applyPrompt(body []byte) ([]byte, bool) {
 // ChatStream 发 chat 请求并返回原始 SSE body 流（调用方负责 Close）。
 // 非 2xx 时 rc 为 nil、body 为上游响应体（供调用方 Classify(status, string(body))、err 为 nil；
 // 只有传输层失败才返回 err。
-// 内容拦截（11128 指纹误报 / 11140 内容审核）自愈：passthrough 模式首遇
-// 触发降级窗口并换中性提示词同请求重试一次；custom 模式 system 已被替换，
-// 被拦意味着内容触发审核，同样换中性 system 重试一次（无害，用户消息不动）。
+// 11128 指纹误报自愈：passthrough 模式首遇触发降级窗口并换中性提示词
+// 同请求重试一次；custom 模式 system 已被替换，重试中性兜底。
+// 11140 内容审核不在此列（换 system 无效，见 isSafetyBlock）。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	prepared, degraded := c.applyPrompt(PrepareBodyOptWithEfforts(body, c.SanitizeFingerprints, c.effortsSnapshot()))
 	rc, status, respBody, err = c.chatOnce(a, prepared)
 	if err != nil || status < 400 {
 		return rc, status, respBody, err
 	}
-	if (status == http.StatusBadRequest || status == http.StatusForbidden) && isContentBlocked(respBody) && !degraded {
-		log.Printf("chat_stream uid=%s: content-blocked (11128/11140, status %d) -> degraded prompt retry", a.UID, status)
+	if isSafetyBlock(respBody) {
+		// 内容审核：透传（客户端可见 displayMsg），不罚号不重试不降级
+		log.Printf("chat_stream uid=%s: safety-blocked (11140, content review) -> passthrough", a.UID)
+		return rc, status, respBody, err
+	}
+	if (status == http.StatusBadRequest || status == http.StatusForbidden) && isFingerprintBlock(respBody) && !degraded {
+		log.Printf("chat_stream uid=%s: content-blocked (11128, status %d) -> degraded prompt retry", a.UID, status)
 		c.degradeTrigger()
 		return c.chatOnce(a, prompt.Rewrite(prepared, prompt.Degraded))
 	}
@@ -384,7 +395,7 @@ func (c *Client) chatOnce(a *auth.Auth, prepared []byte) (rc io.ReadCloser, stat
 		log.Printf("chat_stream uid=%s: upstream %d %s body=%s",
 			a.UID, resp.StatusCode, kind, truncate(string(raw), 200))
 		// 诊断：安全策略命中时记录脱敏后仍被拦的载荷片段（定位未知新指纹/审核触发内容）
-		if isContentBlocked(raw) {
+		if isFingerprintBlock(raw) || isSafetyBlock(raw) {
 			log.Printf("content-block payload snippet uid=%s: %.8000s", a.UID, prepared)
 		}
 		return nil, resp.StatusCode, raw, nil
