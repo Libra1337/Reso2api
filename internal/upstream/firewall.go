@@ -203,9 +203,12 @@ func extractMessageText(body []byte) string {
 }
 
 // FirewallHitResponse 防火墙拦截时返回给客户端的错误体（403）。
+// 形状对齐 OpenAI 内容违规错误（type=invalid_request_error /
+// code=content_policy_violation）：中转站对该标准形状原样透传 message，
+// 不会改写成"无可用渠道/模型不存在"之类的笼统报错。
 func FirewallHitResponse(rule string) []byte {
-	return []byte(`{"error":{"message":"请求内容命中网关内容防火墙规则 [` + rule +
-		`]，已被拦截：该类内容违反大模型平台使用政策，会导致上游账号被永久封禁。请修改后重试。","type":"content_firewall","code":"gateway_firewall"}}`)
+	return []byte(`{"error":{"message":"触发网站风控违禁词，无法调用模型：内容命中网关内容防火墙规则 [` + rule +
+		`]。该类内容会导致上游账号被永久封禁，已被拦截。请修改内容后重试。","type":"invalid_request_error","param":null,"code":"content_policy_violation"}}`)
 }
 
 // FirewallEvent 一次防火墙拦截记录（内存环形，面板展示用）。
