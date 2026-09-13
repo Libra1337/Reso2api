@@ -69,25 +69,38 @@ func (c *Client) FetchRequestUsage(a *auth.Auth, days int) ([]UsageRow, error) {
 		if err != nil {
 			return nil, err
 		}
-		var resp struct {
-			Data struct {
-				Total int `json:"total"`
-				List  []struct {
-					RequestID   string  `json:"requestId"`
-					Credit      float64 `json:"credit"`
-					Model       string  `json:"model"`
-					Client      string  `json:"client"`
-					RequestTime string  `json:"requestTime"`
-					// 注意：响应还携带 inputTrunc（请求内容截断）等敏感字段，
-					// 此处结构体不声明即不解析、不透出（隐私红线）。
-				} `json:"data"`
-			} `json:"data"`
+		// data 两形态：有记录 {total,data:[...]}；无记录直接 []（空数组）。
+		var page struct {
+			Data json.RawMessage `json:"data"`
 		}
-		if err := json.Unmarshal(data, &resp); err != nil {
+		if err := json.Unmarshal(data, &page); err != nil {
 			return nil, fmt.Errorf("usage parse: %w", err)
 		}
-		pageLen := len(resp.Data.List)
-		for _, r := range resp.Data.List {
+		var rowsIn []struct {
+			RequestID   string  `json:"requestId"`
+			Credit      float64 `json:"credit"`
+			Model       string  `json:"model"`
+			Client      string  `json:"client"`
+			RequestTime string  `json:"requestTime"`
+			// 注意：响应还携带 inputTrunc（请求内容截断）等敏感字段，
+			// 此处结构体不声明即不解析、不透出（隐私红线）。
+		}
+		total := 0
+		if len(page.Data) > 0 && page.Data[0] == '{' {
+			var obj struct {
+				Total int             `json:"total"`
+				List  json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal(page.Data, &obj); err != nil {
+				return nil, fmt.Errorf("usage parse: %w", err)
+			}
+			total = obj.Total
+			_ = json.Unmarshal(obj.List, &rowsIn)
+		} else {
+			_ = json.Unmarshal(page.Data, &rowsIn)
+		}
+		pageLen := len(rowsIn)
+		for _, r := range rowsIn {
 			t, err := time.ParseInLocation("2006-01-02 15:04:05", r.RequestTime, time.Local)
 			if err != nil {
 				// 兼容毫秒时间戳形态
@@ -110,7 +123,7 @@ func (c *Client) FetchRequestUsage(a *auth.Auth, days int) ([]UsageRow, error) {
 				Model: r.Model, Client: r.Client, Time: t,
 			})
 		}
-		if pageLen < usagePageSize || len(rows) >= resp.Data.Total {
+		if pageLen < usagePageSize || len(rows) >= total {
 			break
 		}
 	}
