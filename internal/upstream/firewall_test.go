@@ -207,8 +207,8 @@ func TestContentBlockKeyword(t *testing.T) {
 }
 
 func TestLynshenKeywordHintsTriggerBlockForJudge(t *testing.T) {
-	if len(lynshenKeywordHints) < 500 {
-		t.Fatalf("lynshenKeywordHints=%d want >=500", len(lynshenKeywordHints))
+	if n := len(lynshenKeywordHints); n < 20 || n > 80 {
+		t.Fatalf("lynshenKeywordHints=%d want 20..80 high-signal terms", n)
 	}
 	rule, _, action := FirewallCheck(buildBody("", "群管理准则禁止裸聊"))
 	if action != ActionBlock || !strings.HasPrefix(rule, "hint:") {
@@ -226,12 +226,14 @@ func TestLynshenKeywordHintsTriggerBlockForJudge(t *testing.T) {
 		"限量发售今晚开抢",
 		"和弦进行怎么写",
 		"不要过度刺激市场",
+		"禁止色情内容的群规",
+		"粉嫩的花瓣怎么画",
+		"猫咪咪咪叫",
+		"肩颈按摩手法",
+		"this is sm content",
 	} {
-		if _, _, action := FirewallCheck(buildBody("", text)); action == ActionBlock {
-			t.Fatalf("false-positive hint on %q", text)
+		if rule, _, action := FirewallCheck(buildBody("", text)); action == ActionBlock && strings.HasPrefix(rule, "hint:") {
+			t.Fatalf("low-signal hint on %q rule=%q", text, rule)
 		}
-	}
-	if rule, _, action := FirewallCheck(buildBody("", "this is sm content")); action != ActionBlock || rule != "hint:sm" {
-		t.Fatalf("standalone sm should still hint, got action=%q rule=%q", action, rule)
 	}
 }

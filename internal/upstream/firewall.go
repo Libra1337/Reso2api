@@ -154,14 +154,26 @@ func FirewallCheck(prepared []byte) (rule, excerpt, action string) {
 	return observeHit()
 }
 
-// lynshenHintDrop 日常/商务/乐理词：子串命中会把正常请求打进审查，打爆 grok2api 额度。
+// lynshenHintDrop 低信号日常词：即使以后把全量词表加回来也不打审查。
 var lynshenHintDrop = map[string]struct{}{
-	"限量": {},
-	"刺激": {},
-	"和弦": {},
-	"铃声": {},
-	"兼职": {},
-	"媚外": {},
+	"限量":  {},
+	"刺激":  {},
+	"和弦":  {},
+	"铃声":  {},
+	"兼职":  {},
+	"媚外":  {},
+	"色情":  {},
+	"下体":  {},
+	"粉嫩":  {},
+	"咪咪":  {},
+	"按摩":  {},
+	"插进":  {},
+	"傻逼":  {},
+	"发情":  {},
+	"性交":  {},
+	"色小说": {},
+	"阴道":  {},
+	"sm":  {},
 }
 
 // findLynshenKeyword 对齐 lynshen.org 词表。中文仍做无边界子串；纯 ASCII 词要求词边界，
