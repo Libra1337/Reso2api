@@ -43,6 +43,41 @@ const levelStyle = {
   C: "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30",
 } as const;
 
+const passStyle =
+  "border-border/60 bg-transparent text-foreground dark:text-white";
+
+function eventAllowed(e: { observe?: boolean; verdict?: string } | undefined) {
+  if (!e) return false;
+  if (e.observe) return true;
+  const v = (e.verdict || "").toLowerCase();
+  return (
+    v === "fail-open" ||
+    v === "observe" ||
+    v === "marked" ||
+    v === "benign" ||
+    v === "uncertain"
+  );
+}
+
+function eventBadgeClass(e: {
+  rule?: string;
+  observe?: boolean;
+  verdict?: string;
+}) {
+  if (eventAllowed(e)) return passStyle;
+  return levelStyle[RULE_LEVEL[e.rule ?? ""]?.level ?? "C"];
+}
+
+function eventRuleLabel(e: { rule?: string; keyword?: string }) {
+  const rule = e.rule ?? "";
+  return (
+    RULE_LEVEL[rule]?.label ??
+    (rule.startsWith("hint:") ? rule.slice(5) : rule) ??
+    e.keyword ??
+    "违禁词"
+  );
+}
+
 const fmtTime = (unix: number) =>
   new Date(unix * 1000).toLocaleString("zh-CN", {
     month: "2-digit",
@@ -238,7 +273,6 @@ export default function FirewallPage() {
             <>
               <div className="h-80 space-y-1.5 overflow-y-auto pr-1">
                 {events.map((e, i) => {
-                  const meta = RULE_LEVEL[e.rule];
                   return (
                     <div
                       key={`${e.at}-${i}`}
@@ -252,10 +286,10 @@ export default function FirewallPage() {
                       <span
                         className={cn(
                           "shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium",
-                          levelStyle[meta?.level ?? "C"],
+                          eventBadgeClass(e),
                         )}
                       >
-                        {meta?.label ?? e.rule}
+                        {eventRuleLabel(e)}
                       </span>
                       <span className="min-w-0 flex-1">
                         <span
@@ -306,8 +340,7 @@ export default function FirewallPage() {
       </Card>
 
       <p className="text-[11px] text-muted-foreground">
-        只有「色情（涉未成年必拦）/政治暴恐」会拦截；武器/毒品/恶意软件/深伪/自杀/越狱声明等灰色内容仅标记放行（蓝色），
-        由上游逐请求反馈与熔断兜底；正常编程与安全研究不误杀。
+        只有审查判定 porn / political 才拦截（红/橙标签）；观察、fail-open、benign 等放行事件用白边标签，不再沿用拦截色。
       </p>
 
       {/* 完整内容弹窗 */}
@@ -321,13 +354,12 @@ export default function FirewallPage() {
               <span
                 className={cn(
                   "rounded border px-1.5 py-0.5 text-[10px] font-medium",
-                  levelStyle[RULE_LEVEL[detailEvent?.rule ?? ""]?.level ?? "C"],
+                  eventBadgeClass(detailEvent ?? {}),
                 )}
               >
-                {RULE_LEVEL[detailEvent?.rule ?? ""]?.label ??
-                  detailEvent?.rule}
+                {eventRuleLabel(detailEvent ?? {})}
               </span>
-              拦截详情
+              {eventAllowed(detailEvent) ? "放行详情" : "拦截详情"}
             </DialogTitle>
             {detailEvent && (
               <DialogDescription className="font-mono text-[11px]">
