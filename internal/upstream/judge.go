@@ -239,7 +239,7 @@ func judgeRetryable(err error) bool {
 	if strings.Contains(msg, "Timeout") || strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "Client.Timeout") {
 		return false
 	}
-	if strings.HasPrefix(msg, "judge HTTP 502") || strings.HasPrefix(msg, "judge HTTP 503") || strings.HasPrefix(msg, "judge HTTP 429") {
+	if strings.HasPrefix(msg, "judge HTTP 502") || strings.HasPrefix(msg, "judge HTTP 503") {
 		return true
 	}
 	if strings.HasPrefix(msg, "judge request failed:") {

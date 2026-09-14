@@ -71,6 +71,9 @@ func TestJudgeRetryableSkipsTimeouts(t *testing.T) {
 	if !judgeRetryable(fmt.Errorf("judge HTTP 502")) {
 		t.Fatal("502 must retry")
 	}
+	if judgeRetryable(fmt.Errorf("judge HTTP 429")) {
+		t.Fatal("429 must not retry")
+	}
 	if judgeRetryable(fmt.Errorf("judge HTTP 400")) {
 		t.Fatal("400 must not retry")
 	}

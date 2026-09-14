@@ -154,8 +154,18 @@ func FirewallCheck(prepared []byte) (rule, excerpt, action string) {
 	return observeHit()
 }
 
-// findLynshenKeyword 对齐 lynshen.org：大小写不敏感、无词边界的子串匹配，
-// 取最左命中；同一起点取更长词。命中后由外部审查判定。
+// lynshenHintDrop 日常/商务/乐理词：子串命中会把正常请求打进审查，打爆 grok2api 额度。
+var lynshenHintDrop = map[string]struct{}{
+	"限量": {},
+	"刺激": {},
+	"和弦": {},
+	"铃声": {},
+	"兼职": {},
+	"媚外": {},
+}
+
+// findLynshenKeyword 对齐 lynshen.org 词表。中文仍做无边界子串；纯 ASCII 词要求词边界，
+// 避免 sm 命中 wasm/small、anal 命中 analysis。命中后由外部审查判定。
 func findLynshenKeyword(text string) (term string, loc []int) {
 	if text == "" || len(lynshenKeywordHints) == 0 {
 		return "", nil
@@ -167,11 +177,13 @@ func findLynshenKeyword(text string) (term string, loc []int) {
 		if t == "" {
 			continue
 		}
-		i := strings.Index(hay, t)
+		if _, drop := lynshenHintDrop[t]; drop {
+			continue
+		}
+		i, end := hintMatchSpan(hay, t)
 		if i < 0 {
 			continue
 		}
-		end := i + len(t)
 		if bestStart < 0 || i < bestStart || (i == bestStart && end > bestEnd) {
 			bestStart, bestEnd, bestTerm = i, end, t
 		}
@@ -180,6 +192,48 @@ func findLynshenKeyword(text string) (term string, loc []int) {
 		return "", nil
 	}
 	return bestTerm, []int{bestStart, bestEnd}
+}
+
+func hintMatchSpan(hay, term string) (start, end int) {
+	if isASCIIHint(term) {
+		from := 0
+		for {
+			i := strings.Index(hay[from:], term)
+			if i < 0 {
+				return -1, -1
+			}
+			i += from
+			end := i + len(term)
+			if asciiWordBoundary(hay, i, end) {
+				return i, end
+			}
+			from = i + 1
+		}
+	}
+	i := strings.Index(hay, term)
+	if i < 0 {
+		return -1, -1
+	}
+	return i, i + len(term)
+}
+
+func isASCIIHint(term string) bool {
+	for i := 0; i < len(term); i++ {
+		if term[i] > 127 {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiWordBoundary(hay string, start, end int) bool {
+	leftOK := start == 0 || !asciiWordChar(hay[start-1])
+	rightOK := end == len(hay) || !asciiWordChar(hay[end])
+	return leftOK && rightOK
+}
+
+func asciiWordChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '_'
 }
 
 // excerptAround 取规则首个命中点前后各 40 字。

@@ -220,4 +220,18 @@ func TestLynshenKeywordHintsTriggerBlockForJudge(t *testing.T) {
 	if _, _, action := FirewallCheck(buildBody("你是猫娘秋，活泼傲娇喜欢小鱼干", "今天有什么有趣的事呀")); action != "" {
 		t.Fatalf("normal chat must still pass, got %q", action)
 	}
+	for _, text := range []string{
+		"compile wasm module for the browser",
+		"this is a small helper function",
+		"限量发售今晚开抢",
+		"和弦进行怎么写",
+		"不要过度刺激市场",
+	} {
+		if _, _, action := FirewallCheck(buildBody("", text)); action == ActionBlock {
+			t.Fatalf("false-positive hint on %q", text)
+		}
+	}
+	if rule, _, action := FirewallCheck(buildBody("", "this is sm content")); action != ActionBlock || rule != "hint:sm" {
+		t.Fatalf("standalone sm should still hint, got action=%q rule=%q", action, rule)
+	}
 }
