@@ -386,7 +386,7 @@ function ImportDialog({ onDone }: { onDone: () => void }) {
         <DialogHeader>
           <DialogTitle>导入账号凭证</DialogTitle>
           <DialogDescription>
-            支持 workbuddy-desktop 导出的 JSON，可多文件批量导入
+            支持单号 JSON、多号数组合并，以及 workbuddy-desktop 导出文件
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">

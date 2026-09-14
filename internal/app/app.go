@@ -1789,55 +1789,29 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			apiError(w, http.StatusBadRequest, "请求体缺少 raw 字段")
 			return
 		}
-		au, err := auth.Parse([]byte(req.Raw))
+		list, err := auth.ParseAll([]byte(req.Raw))
 		if err != nil {
 			apiError(w, http.StatusBadRequest, "解析凭证失败："+err.Error())
 			return
 		}
-		if au.UID == "" || au.AccessToken == "" {
-			apiError(w, http.StatusBadRequest, "凭证缺少 uid 或 accessToken")
-			return
-		}
-		if !validUID(au.UID) {
-			apiError(w, http.StatusBadRequest, "凭证 uid 含非法字符（仅允许字母/数字与 -_._@）")
-			return
-		}
-		// 桌面端导出的 expiresAt 为毫秒时间戳，网关按秒处理
-		if au.ExpiresAt > 1_000_000_000_000 {
-			au.ExpiresAt /= 1000
-		}
-		doc := map[string]any{
-			"auth": map[string]any{
-				"accessToken":  au.AccessToken,
-				"refreshToken": au.RefreshToken,
-				"expiresAt":    au.ExpiresAt,
-				"domain":       au.Domain,
-			},
-			"account": map[string]any{
-				"uid":          au.UID,
-				"enterpriseId": au.EnterpriseID,
-				"nickname":     au.Nickname,
-			},
-		}
-		raw, err := json.MarshalIndent(doc, "", "  ")
-		if err != nil {
-			apiError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		_ = os.MkdirAll(a.cfg.AuthDir, 0o755)
-		fp := filepath.Join(a.cfg.AuthDir, "workbuddy-"+au.UID+".json")
-		tmp := fp + ".tmp"
-		if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-			apiError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if err := os.Rename(tmp, fp); err != nil {
-			apiError(w, http.StatusInternalServerError, err.Error())
-			return
+		imported := make([]map[string]string, 0, len(list))
+		for _, au := range list {
+			fp, err := a.writeImportedWorkBuddy(au)
+			if err != nil {
+				apiError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			log.Printf("imported account uid=%s nickname=%s file=%s", au.UID, au.Nickname, filepath.Base(fp))
+			imported = append(imported, map[string]string{"uid": au.UID, "nickname": au.Nickname})
 		}
 		a.reloadAccounts()
-		log.Printf("imported account uid=%s nickname=%s file=%s", au.UID, au.Nickname, filepath.Base(fp))
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": au.UID, "nickname": au.Nickname})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":       true,
+			"count":    len(imported),
+			"uid":      imported[0]["uid"],
+			"nickname": imported[0]["nickname"],
+			"imported": imported,
+		})
 	})
 	inner.HandleFunc("POST /api/account/ban_check", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -2304,6 +2278,45 @@ func remoteIP(r *http.Request) string {
 func pwFingerprint(pw string) string {
 	sum := sha256.Sum256([]byte("ww2a:" + pw))
 	return hex.EncodeToString(sum[:8])
+}
+
+func (a *App) writeImportedWorkBuddy(au *auth.Auth) (string, error) {
+	if au.UID == "" || au.AccessToken == "" {
+		return "", fmt.Errorf("凭证缺少 uid 或 accessToken")
+	}
+	if !validUID(au.UID) {
+		return "", fmt.Errorf("凭证 uid 含非法字符（仅允许字母/数字与 -_._@）")
+	}
+	if au.ExpiresAt > 1_000_000_000_000 {
+		au.ExpiresAt /= 1000
+	}
+	doc := map[string]any{
+		"auth": map[string]any{
+			"accessToken":  au.AccessToken,
+			"refreshToken": au.RefreshToken,
+			"expiresAt":    au.ExpiresAt,
+			"domain":       au.Domain,
+		},
+		"account": map[string]any{
+			"uid":          au.UID,
+			"enterpriseId": au.EnterpriseID,
+			"nickname":     au.Nickname,
+		},
+	}
+	raw, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	_ = os.MkdirAll(a.cfg.AuthDir, 0o755)
+	fp := filepath.Join(a.cfg.AuthDir, "workbuddy-"+au.UID+".json")
+	tmp := fp + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, fp); err != nil {
+		return "", err
+	}
+	return fp, nil
 }
 
 // randToken 生成 n 字节随机 hex 串。

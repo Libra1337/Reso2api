@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -122,6 +123,48 @@ func (a *Auth) NeedsRefresh(within time.Duration) bool {
 //	嵌套形 {"auth":{...},"account":{...}}  （插件 OAuth 输出）
 //	扁平形 {"accessToken":...,"uid":...}   （CPA 面板手建）
 func Parse(raw []byte) (*Auth, error) {
+	list, err := ParseAll(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(list) != 1 {
+		return nil, fmt.Errorf("storage_parse_error: expected 1 account, got %d", len(list))
+	}
+	return list[0], nil
+}
+
+// ParseAll 解析单号对象或账号数组。数组里每项走同一套字段兼容。
+func ParseAll(raw []byte) ([]*Auth, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("empty auth storage")
+	}
+	if raw[0] == '[' {
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return nil, fmt.Errorf("storage_parse_error: %w", err)
+		}
+		if len(items) == 0 {
+			return nil, fmt.Errorf("storage_parse_error: empty account array")
+		}
+		out := make([]*Auth, 0, len(items))
+		for i, item := range items {
+			a, err := parseOne(item)
+			if err != nil {
+				return nil, fmt.Errorf("account[%d]: %w", i, err)
+			}
+			out = append(out, a)
+		}
+		return out, nil
+	}
+	a, err := parseOne(raw)
+	if err != nil {
+		return nil, err
+	}
+	return []*Auth{a}, nil
+}
+
+func parseOne(raw []byte) (*Auth, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("empty auth storage")
 	}
@@ -168,27 +211,33 @@ func Parse(raw []byte) (*Auth, error) {
 		}
 	} else {
 		var f struct {
-			AccessToken  string `json:"accessToken"`
-			RefreshToken string `json:"refreshToken"`
-			ExpiresAt    int64  `json:"expiresAt"`
-			Domain       string `json:"domain"`
-			ApiHost      string `json:"apiHost"`
-			MachineID    string `json:"machineId"`
-			DeviceID     string `json:"deviceId"`
-			MachineToken string `json:"machineToken"`
-			MachineType  string `json:"machineType"`
-			DeviceToken  string `json:"device_token"`
-			UID          string `json:"uid"`
-			EnterpriseID string `json:"enterpriseId"`
-			Nickname     string `json:"nickname"`
+			AccessToken     string `json:"accessToken"`
+			AccessTokenAlt  string `json:"access_token"`
+			RefreshToken    string `json:"refreshToken"`
+			RefreshTokenAlt string `json:"refresh_token"`
+			ExpiresAt       int64  `json:"expiresAt"`
+			ExpiresAtAlt    int64  `json:"expires_at"`
+			ExpiresIn       int64  `json:"expires_in"`
+			CreatedAt       int64  `json:"created_at"`
+			Domain          string `json:"domain"`
+			ApiHost         string `json:"apiHost"`
+			MachineID       string `json:"machineId"`
+			DeviceID        string `json:"deviceId"`
+			MachineToken    string `json:"machineToken"`
+			MachineType     string `json:"machineType"`
+			DeviceToken     string `json:"device_token"`
+			UID             string `json:"uid"`
+			EnterpriseID    string `json:"enterpriseId"`
+			EnterpriseIDAlt string `json:"enterprise_id"`
+			Nickname        string `json:"nickname"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
 		}
 		a = Auth{
-			AccessToken:  f.AccessToken,
-			RefreshToken: f.RefreshToken,
-			ExpiresAt:    f.ExpiresAt,
+			AccessToken:  firstNonEmpty(f.AccessToken, f.AccessTokenAlt),
+			RefreshToken: firstNonEmpty(f.RefreshToken, f.RefreshTokenAlt),
+			ExpiresAt:    firstInt64(f.ExpiresAt, f.ExpiresAtAlt),
 			Domain:       f.Domain,
 			ApiHost:      f.ApiHost,
 			MachineID:    f.MachineID,
@@ -196,14 +245,39 @@ func Parse(raw []byte) (*Auth, error) {
 			MachineToken: f.MachineToken,
 			MachineType:  f.MachineType,
 			UID:          f.UID,
-			EnterpriseID: f.EnterpriseID,
+			EnterpriseID: firstNonEmpty(f.EnterpriseID, f.EnterpriseIDAlt),
 			Nickname:     f.Nickname,
+		}
+		if a.ExpiresAt == 0 && f.ExpiresIn > 0 {
+			base := f.CreatedAt
+			if base <= 0 {
+				base = time.Now().Unix()
+			}
+			a.ExpiresAt = base + f.ExpiresIn
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return nil, fmt.Errorf("parse_error: missing accessToken")
 	}
 	return &a, nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func firstInt64(vals ...int64) int64 {
+	for _, v := range vals {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 // SaveAtomic 以嵌套形原子写回 FilePath（tmp + rename），保持 CPA 插件可读格式。

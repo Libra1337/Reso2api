@@ -37,6 +37,29 @@ func TestParseMissingToken(t *testing.T) {
 	}
 }
 
+func TestParseSnakeCaseAndArray(t *testing.T) {
+	raw := []byte(`[
+		  {"access_token":"at1","refresh_token":"rt1","expires_in":3600,"created_at":1753600000,"uid":"u-a","nickname":"n1","domain":"www.codebuddy.cn"},
+		  {"access_token":"at2","refresh_token":"rt2","expires_at":1753601000,"uid":"u-b","nickname":"n2"}
+		]`)
+	list, err := ParseAll(raw)
+	if err != nil {
+		t.Fatalf("ParseAll: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("len=%d want 2", len(list))
+	}
+	if list[0].AccessToken != "at1" || list[0].UID != "u-a" || list[0].ExpiresAt != 1753603600 {
+		t.Fatalf("first=%+v", list[0])
+	}
+	if list[1].AccessToken != "at2" || list[1].ExpiresAt != 1753601000 {
+		t.Fatalf("second=%+v", list[1])
+	}
+	if _, err := Parse(raw); err == nil {
+		t.Fatal("Parse of array must fail")
+	}
+}
+
 func TestGlobalRegion(t *testing.T) {
 	for _, d := range []string{"workbuddy.ai", "www.workbuddy.ai", "api.workbuddy.ai", "WorkBuddy.AI"} {
 		sa := &Auth{Domain: d}
