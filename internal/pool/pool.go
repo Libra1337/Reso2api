@@ -89,6 +89,14 @@ func (e *entry) healthy(now time.Time) bool {
 	return true
 }
 
+func (e *entry) cooledForModel(model string, now time.Time) bool {
+	if model == "" || e.modelCool == nil {
+		return false
+	}
+	until, ok := e.modelCool[model]
+	return ok && now.Before(until)
+}
+
 // stateFile 持久化格式。
 type accountState struct {
 	Credits  int64     `json:"credits"`
@@ -167,6 +175,11 @@ const pickTopK = 3
 
 // PickExcluding 同上，但跳过 tried 中的 uid（请求级轮换）。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
+	return p.PickExcludingForModel(tried, "")
+}
+
+// PickExcludingForModel 按模型选号：跳过 tried，以及对该模型处于 6004 冷却的账号。
+func (p *Pool) PickExcludingForModel(tried map[string]bool, model string) *auth.Auth {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
@@ -176,6 +189,9 @@ func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 			continue
 		}
 		if !e.healthy(now) {
+			continue
+		}
+		if e.cooledForModel(model, now) {
 			continue
 		}
 		cand = append(cand, e)
@@ -335,8 +351,7 @@ func (p *Pool) CooledForModel(uid, model string) bool {
 	if !ok {
 		return false
 	}
-	until, ok := e.modelCool[model]
-	return ok && time.Now().Before(until)
+	return e.cooledForModel(model, time.Now())
 }
 
 // ModelCoolEntry 单账号在某模型上的冷却明细。

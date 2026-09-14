@@ -267,6 +267,26 @@ func TestCooldownSoftForModel(t *testing.T) {
 	}
 }
 
+func TestPickExcludingForModelSkipsCooled(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.SetCredits("u1", 100)
+	p.SetCredits("u2", 10)
+	p.CooldownSoftForModel("u1", time.Now().Add(time.Hour), "glm-5.3", "6004")
+	got := p.PickExcludingForModel(nil, "glm-5.3")
+	if got == nil || got.UID != "u2" {
+		t.Fatalf("glm-5.3 pick=%+v want u2", got)
+	}
+	other := p.PickExcludingForModel(nil, "kimi-k3-1")
+	if other == nil {
+		t.Fatal("other model should still pick")
+	}
+	if p.PickExcludingForModel(map[string]bool{"u2": true}, "glm-5.3") != nil {
+		t.Fatal("no remaining glm-5.3 account")
+	}
+}
+
 // 11140 熔断：1 小时内 3 次自动禁用（防持续违规内容烧号）。
 func TestNoteContentBlockCircuitBreaker(t *testing.T) {
 	p := New("")

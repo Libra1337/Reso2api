@@ -157,40 +157,42 @@ func (h *Handler) stickyKey(kind provider.Kind) string { return kind.String() }
 // pickWithSticky 粘性路由选择账号。
 // 优先使用上次成功路由的账号，直到：
 //   - 账号进入冷却/禁用状态
+//   - 该模型处于 6004 限额冷却
 //   - 连续成功请求达到 maxReqs 次（默认 50），自动轮换
 //
-// 任一条件触发则降级为 Pick() 选新账号并重置粘性记录。
+// 任一条件触发则降级为按模型选号并重置粘性记录。
 func (h *Handler) pickWithSticky(rt *Runtime) *auth.Auth {
+	return h.pickWithStickyForModel(rt, "")
+}
+
+func (h *Handler) pickWithStickyForModel(rt *Runtime, model string) *auth.Auth {
 	const defaultMaxReqs = 50
 
 	h.stickyMu.RLock()
 	sticky := h.sticky[h.stickyKey(rt.Kind)]
 	h.stickyMu.RUnlock()
 
-	// 尝试粘性路由
 	if sticky != nil && sticky.uid != "" && sticky.reqCount < sticky.maxReqs {
 		acct := rt.Pool.AuthByUID(sticky.uid)
 		if acct != nil {
 			status, ok := rt.Pool.Status(sticky.uid)
-			if ok && !status.Cooling && !status.Disabled {
-				log.Printf("sticky route platform=%s uid=%s count=%d/%d",
-					rt.Kind, sticky.uid, sticky.reqCount, sticky.maxReqs)
+			if ok && !status.Cooling && !status.Disabled && !rt.Pool.CooledForModel(sticky.uid, model) {
+				log.Printf("sticky route platform=%s uid=%s model=%s count=%d/%d",
+					rt.Kind, sticky.uid, model, sticky.reqCount, sticky.maxReqs)
 				return acct
 			}
 		}
 	}
 
-	// 降级：选择余额最高的 healthy 账号
-	acct := rt.Pool.Pick()
+	acct := rt.Pool.PickExcludingForModel(nil, model)
 	if acct == nil {
 		return nil
 	}
 
-	// 新建粘性记录
 	h.stickyMu.Lock()
 	h.sticky[h.stickyKey(rt.Kind)] = &stickyEntry{uid: acct.UID, maxReqs: defaultMaxReqs}
 	h.stickyMu.Unlock()
-	log.Printf("new sticky route platform=%s uid=%s maxReqs=%d", rt.Kind, acct.UID, defaultMaxReqs)
+	log.Printf("new sticky route platform=%s uid=%s model=%s maxReqs=%d", rt.Kind, acct.UID, model, defaultMaxReqs)
 	return acct
 }
 
@@ -500,24 +502,18 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 	var lastBody []byte              // 最后一次上游错误（轮转耗尽时按原状态透传）
 	routeModel := extractModel(body) // 出站裸模型名（6004 模型级冷却按它画界）
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		acct := h.pickWithSticky(rt)
+		acct := h.pickWithStickyForModel(rt, routeModel)
 		if acct == nil {
 			break
 		}
-		if tried[acct.UID] {
-			// 粘性路由选回已尝试的账号，清除粘性记录后重试
+		if tried[acct.UID] || rt.Pool.CooledForModel(acct.UID, routeModel) {
 			h.stickyClear(rt)
-			acct = rt.Pool.PickExcluding(tried)
+			acct = rt.Pool.PickExcludingForModel(tried, routeModel)
 			if acct == nil {
 				break
 			}
 		}
 		tried[acct.UID] = true
-		// 模型级冷却（429 6004）：只跳过触发模型的请求，账号对其他模型可用
-		if rt.Pool.CooledForModel(acct.UID, routeModel) {
-			lastErr = fmt.Errorf("account %s cooling for model %s (6004)", acct.UID, routeModel)
-			continue
-		}
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
 			log.Printf("refresh start platform=%s uid=%s reason=request", rt.Kind, acct.UID)
 			if err := rt.Upstream.RefreshToken(acct); err != nil {
@@ -559,15 +555,18 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 			case provider.ErrHardCredit:
 				rt.Pool.Cooldown(acct.UID, pool.CoolHard, h.cfg.HardCooldown, "余额/权益不足")
 			case provider.ErrSoftRate:
-				// 6004 模型级限流：上游明说「将在 X 重置」→ 只对该模型冷却到 X，
-				// 账号对其他模型立即可用（整号冷却会误伤其他模型流量）。
+				// 6004 模型级限流：只对该模型冷却，账号对其他模型立即可用。
+				// 同请求立刻换号，不把 429 丢回客户端（避免会话断链）。
 				if provider.IsModelRateLimit(string(respBody)) {
-					if resetAt, ok := provider.ParseSoftRateReset(string(respBody)); ok {
-						rt.Pool.CooldownSoftForModel(acct.UID, resetAt, routeModel, "6004 model rate limit")
-						lastErr = &provider.Error{Kind: kind, Status: status, Msg: string(respBody)}
-						lastStatus, lastBody = status, respBody
-						continue
+					resetAt, ok := provider.ParseSoftRateReset(string(respBody))
+					if !ok {
+						resetAt = time.Now().Add(h.cfg.SoftCooldown)
 					}
+					rt.Pool.CooldownSoftForModel(acct.UID, resetAt, routeModel, "6004 model rate limit")
+					log.Printf("model rate limit rotate platform=%s uid=%s model=%s reset=%s",
+						rt.Kind, acct.UID, routeModel, resetAt.Format(time.RFC3339))
+					lastErr = &provider.Error{Kind: kind, Status: status, Msg: string(respBody)}
+					continue
 				}
 				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "429 rate limit")
 			case provider.ErrSessionDead:
