@@ -253,6 +253,10 @@ func (h *Handler) RequestLogs() []ReqLog {
 
 // finishReqLog 从上游 usage 对象提取指标并落账。
 func (h *Handler) finishReqLog(t0 time.Time, model, channel, uid string, status int, stream bool, ttfb time.Duration, usage map[string]any, reqBody []byte) {
+	h.finishReqLogFile(t0, model, channel, uid, status, stream, ttfb, usage, h.reqLogs.SaveBodyArchive(reqBody))
+}
+
+func (h *Handler) finishReqLogFile(t0 time.Time, model, channel, uid string, status int, stream bool, ttfb time.Duration, usage map[string]any, bodyFile string) {
 	l := ReqLog{
 		Time:    t0.Format("01-02 15:04:05"),
 		Model:   model,
@@ -263,7 +267,7 @@ func (h *Handler) finishReqLog(t0 time.Time, model, channel, uid string, status 
 		TTFBMS:  ttfb.Milliseconds(),
 		TotalMS: time.Since(t0).Milliseconds(),
 	}
-	l.BodyFile = h.reqLogs.SaveBodyArchive(reqBody)
+	l.BodyFile = bodyFile
 	if usage != nil {
 		l.InTokens = num(usage["prompt_tokens"])
 		l.OutTokens = num(usage["completion_tokens"])

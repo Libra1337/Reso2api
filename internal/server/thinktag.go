@@ -50,6 +50,9 @@ func (t *thinkTagWriter) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.buf = append(t.buf, p...)
+	if len(t.buf) > 1<<20 {
+		t.buf = t.buf[len(t.buf)-64*1024:]
+	}
 	for {
 		i := bytes.IndexByte(t.buf, '\n')
 		if i < 0 {

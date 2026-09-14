@@ -627,8 +627,10 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		return // dispatchChat 已写错误响应
 	}
 	defer rc.Close()
+	bodyFile := h.reqLogs.SaveBodyArchive(chatBody)
+	chatBody = nil
 	usage, ttfb := h.responsesRelay(w, rc, model, wantStream.Stream, t0)
-	h.finishReqLog(t0, model, rt.Kind.String(), uid, http.StatusOK, wantStream.Stream, ttfb, usage, chatBody)
+	h.finishReqLogFile(t0, model, rt.Kind.String(), uid, http.StatusOK, wantStream.Stream, ttfb, usage, bodyFile)
 }
 
 func randHex(n int) string {

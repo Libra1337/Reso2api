@@ -436,6 +436,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rc.Close()
+	bodyFile := h.reqLogs.SaveBodyArchive(body)
+	body = nil
 	fbw := newFirstByteWriter(w, t0)
 	if peek.Stream {
 		tee := &usageTee{}
@@ -449,7 +451,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if ttw != nil {
 			ttw.Finish()
 		}
-		h.finishReqLog(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, true, fbw.ttfb(), tee.snapshot(), body)
+		h.finishReqLogFile(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, true, fbw.ttfb(), tee.snapshot(), bodyFile)
 		_ = err
 		return
 	}
@@ -462,7 +464,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		wrapThinkTag(resp)
 	}
 	usage, _ := resp["usage"].(map[string]any)
-	h.finishReqLog(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, false, 0, usage, body)
+	h.finishReqLogFile(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, false, 0, usage, bodyFile)
 	writeJSON(fbw, http.StatusOK, resp)
 }
 

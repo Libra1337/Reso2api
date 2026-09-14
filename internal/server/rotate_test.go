@@ -77,6 +77,7 @@ func TestDispatchChatRotatesOnModelRateLimit(t *testing.T) {
 		MaxRotate: 5,
 	})
 	rt := h.cfg.Runtimes[provider.WorkBuddy]
+	h.sticky[h.stickyKey(rt.Kind)] = &stickyEntry{uid: "u1", maxReqs: 50}
 	body := []byte(`{"model":"glm-5.3","messages":[{"role":"user","content":"hi"}]}`)
 	rec := httptest.NewRecorder()
 	rc, uid, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", body, rec)
