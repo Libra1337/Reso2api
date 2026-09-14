@@ -57,14 +57,14 @@ var firewallRules = []firewallRule{
 		`(?i)(圣战宣言|isil|isis(的)?(宣传|宣言|招募)|暴恐袭击宣言|制作(炸弹背心|自杀式)|加入(圣战|isil|isis))`)},
 	// -- 科技/危害类（observe：仅标记，放行）--
 	{Name: "weapon-cbrn", Observe: true,
-		Pattern: regexp.MustCompile(`(?i)(炸弹|爆炸装置|炸药|土制炸弹|核武器|脏弹|生化武器|神经毒剂|沙林毒气|vx毒剂|蓖麻毒素|c4炸药|\bied\b|bomb|explosive device)`),
+		Pattern: regexp.MustCompile(`(?i)(炸弹|爆炸装置|炸药|土制炸弹|核武器|脏弹|生化武器|神经毒剂|沙林毒气|vx毒剂|蓖麻毒素|c4炸药|\bied\b|\bbomb\b|explosive device)`),
 		Pair:    regexp.MustCompile(`(?i)(制造|制作|合成|配方|原料|怎么造|如何制造|how to (make|build)|make a bomb|build.*explosive)`)},
 	{Name: "drug-synthesis", Observe: true,
 		Pattern: regexp.MustCompile(`(?i)(冰毒|甲基苯丙胺|海洛因|摇头丸|\bmeth(amphetamine)?\b|heroin|合成大麻|k粉|氯胺酮(粉)?)`),
 		Pair:    regexp.MustCompile(`(?i)(合成|制作|提纯|配方|工艺|制毒|how to (make|synthesize)|synthesize)`)},
 	{Name: "malware", Observe: true,
 		Pattern: regexp.MustCompile(`(?i)(勒索软件|ransomware|僵尸网络|botnet|键盘记录器|keylogger|挖矿木马|蠕虫病毒(攻击)|ddos(攻击工具)?)`),
-		Pair:    regexp.MustCompile(`(?i)(编写|开发|制作|源码|免杀|植入|用来攻击|攻击(他人|公司|别人)|write|create|develop|how to (write|create|deploy))`)},
+		Pair:    regexp.MustCompile(`(?i)(编写|开发|制作|源码|免杀|植入|用来攻击|攻击(他人|公司|别人)|\bwrite\b|\bcreate\b|\bdevelop\b|how to (write|create|deploy))`)},
 	{Name: "nude-deepfake", Observe: true,
 		Pattern: regexp.MustCompile(`(?i)(裸照|裸体|nude\s*(photo|pic|image|video)|deepfake|换脸(色情|裸)|ai去衣|脱衣(ai|软件))`),
 		Pair:    regexp.MustCompile(`(?i)(生成|合成|制作|伪造|p(出来|成|图)|make|generate|create)`)},
@@ -75,7 +75,7 @@ var firewallRules = []firewallRule{
 		`(?i)(无视|忽略|绕过|不要遵守)[^
 ]{0,40}(安全|审核|内容审查|过滤|限制)`)},
 	{Name: "bypass-review-en", Observe: true, Pattern: regexp.MustCompile(
-		`(?i)(ignore|disregard|bypass)\s+(all\s+|any\s+|the\s+|your\s+|their\s+|its\s+)*(previous\s+|prior\s+|above\s+|earlier\s+)*(user\s+|system\s+|safety\s+|content\s+|security\s+)*(instructions?|prompts?|rules|guardrails|guidelines|policies?|restrictions?|filters?|safety)`)},
+		`(?i)\b(ignore|disregard|bypass)\s+(all\s+|any\s+|the\s+|your\s+|their\s+|its\s+)*(previous\s+|prior\s+|above\s+|earlier\s+)*(user\s+|system\s+|safety\s+|content\s+|security\s+)*(instructions?|prompts?|rules|guardrails|guidelines|policies?|restrictions?|filters?|safety)`)},
 	{Name: "no-safety-claim", Observe: true, Pattern: regexp.MustCompile(
 		`(?i)(没有|不带|do not have|don't have|without|any)\s{0,3}(任何)?\s{0,3}(安全(?:限制|准则|指南|约束)?|safety|guideline|restriction)`)},
 	// -- 政治敏感（observe：仅标记，红线暴恐已在上）--
@@ -148,7 +148,38 @@ func FirewallCheck(prepared []byte) (rule, excerpt, action string) {
 			}
 		}
 	}
+	if term, loc := findLynshenKeyword(text); term != "" {
+		return "hint:" + term, excerptAt(text, loc[0], loc[1]), ActionBlock
+	}
 	return observeHit()
+}
+
+// findLynshenKeyword 对齐 lynshen.org：大小写不敏感、无词边界的子串匹配，
+// 取最左命中；同一起点取更长词。命中后由外部审查判定。
+func findLynshenKeyword(text string) (term string, loc []int) {
+	if text == "" || len(lynshenKeywordHints) == 0 {
+		return "", nil
+	}
+	hay := strings.ToLower(text)
+	bestStart, bestEnd := -1, -1
+	bestTerm := ""
+	for _, t := range lynshenKeywordHints {
+		if t == "" {
+			continue
+		}
+		i := strings.Index(hay, t)
+		if i < 0 {
+			continue
+		}
+		end := i + len(t)
+		if bestStart < 0 || i < bestStart || (i == bestStart && end > bestEnd) {
+			bestStart, bestEnd, bestTerm = i, end, t
+		}
+	}
+	if bestStart < 0 {
+		return "", nil
+	}
+	return bestTerm, []int{bestStart, bestEnd}
 }
 
 // excerptAround 取规则首个命中点前后各 40 字。
@@ -249,6 +280,12 @@ func FirewallKeyword(rule string) string {
 	}
 	if kw, ok := firewallRuleKeywords[rule]; ok {
 		return kw
+	}
+	if strings.HasPrefix(rule, "hint:") {
+		term := strings.TrimPrefix(rule, "hint:")
+		if term != "" {
+			return term
+		}
 	}
 	for _, kw := range contentBlockKeywords {
 		if strings.EqualFold(rule, kw) {

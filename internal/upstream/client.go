@@ -383,20 +383,22 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 			} else if action == ActionBlock {
 				if jc := c.JudgeSnapshot(); jc.Active() {
 					text := extractMessageText(prepared)
+					started := time.Now()
 					v, jerr := callJudge(jc, []string{kw}, []string{text})
+					elapsedMS := time.Since(started).Milliseconds()
 					if jerr != nil {
-						log.Printf("FIREWALL uid=%s rule=%s judge failed (%v) -> fail-open", a.UID, rule, jerr)
+						log.Printf("FIREWALL uid=%s rule=%s judge failed (%v) elapsed=%dms -> fail-open", a.UID, rule, jerr, elapsedMS)
 						c.recordFirewallHitMeta(a, rule, model, excerpt, prepared, true, FirewallHitMeta{
 							Keyword: kw, Verdict: "fail-open", Reason: jerr.Error(), Entry: "chat", Judge: jc.Model,
 						})
 					} else if v.Blocks() {
-						log.Printf("FIREWALL uid=%s rule=%s judge=%s reason=%.120s -> blocked", a.UID, rule, v.Category, v.Reason)
+						log.Printf("FIREWALL uid=%s rule=%s judge=%s reason=%.120s elapsed=%dms -> blocked", a.UID, rule, v.Category, v.Reason, elapsedMS)
 						c.recordFirewallHitMeta(a, v.Keyword(), model, excerpt, prepared, false, FirewallHitMeta{
 							Keyword: kw, Verdict: v.Category, Reason: v.Reason, Entry: "chat", Judge: jc.Model,
 						})
 						return nil, http.StatusForbidden, FirewallHitResponse(v.Keyword()), nil
 					} else {
-						log.Printf("FIREWALL uid=%s rule=%s judge=%s -> marked (forwarded)", a.UID, rule, v.Category)
+						log.Printf("FIREWALL uid=%s rule=%s judge=%s elapsed=%dms -> marked (forwarded)", a.UID, rule, v.Category, elapsedMS)
 						c.recordFirewallHitMeta(a, rule, model, excerpt, prepared, true, FirewallHitMeta{
 							Keyword: kw, Verdict: v.Category, Reason: v.Reason, Entry: "chat", Judge: jc.Model,
 						})

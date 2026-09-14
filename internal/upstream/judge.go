@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ const (
 	judgeTextBudget = 6000
 	judgeReasonMax  = 500
 	judgeMaxTokens  = 512
+	judgeRetryMax   = 1
 
 	JudgePorn      = "porn"
 	JudgePolitical = "political"
@@ -42,6 +44,23 @@ Categories:
 In "reason" state the concrete evidence: what the text asks for, and why that makes it blocking or not. One to three sentences, always written in Simplified Chinese (简体中文), regardless of the request text's language.`
 
 var judgeCategories = []string{JudgePorn, JudgePolitical, JudgeBenign, JudgeUncertain}
+
+// judgeTransport 进程级连接池。审查每次 new http.Client 但不换 Transport，
+// 避免对 grok2api 反复 TCP/TLS 握手（线上冷启动曾卡到 11–18s 超时）。
+var judgeTransport = &http.Transport{
+	Proxy:                 http.ProxyFromEnvironment,
+	DialContext:           (&net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	ForceAttemptHTTP2:     true,
+	MaxIdleConns:          32,
+	MaxIdleConnsPerHost:   8,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   5 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+}
+
+func judgeHTTP(timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout, Transport: judgeTransport}
+}
 
 // JudgeConfig 外部审查配置。Enabled 且三项均非空才视为可用。
 type JudgeConfig struct {
@@ -196,6 +215,40 @@ func callJudge(cfg JudgeConfig, hits []string, texts []string) (JudgeVerdict, er
 	if err != nil {
 		return JudgeVerdict{}, err
 	}
+	var last error
+	for attempt := 0; attempt <= judgeRetryMax; attempt++ {
+		v, err := doJudgeOnce(cfg, body)
+		if err == nil {
+			return v, nil
+		}
+		last = err
+		if attempt == judgeRetryMax || !judgeRetryable(err) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return JudgeVerdict{}, last
+}
+
+func judgeRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// 超时再试会把 18s 预算翻倍，客户端更卡，直接 fail-open。
+	if strings.Contains(msg, "Timeout") || strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "Client.Timeout") {
+		return false
+	}
+	if strings.HasPrefix(msg, "judge HTTP 502") || strings.HasPrefix(msg, "judge HTTP 503") || strings.HasPrefix(msg, "judge HTTP 429") {
+		return true
+	}
+	if strings.HasPrefix(msg, "judge request failed:") {
+		return true
+	}
+	return false
+}
+
+func doJudgeOnce(cfg JudgeConfig, body []byte) (JudgeVerdict, error) {
 	req, err := http.NewRequest(http.MethodPost, cfg.endpoint(), bytes.NewReader(body))
 	if err != nil {
 		return JudgeVerdict{}, err
@@ -203,8 +256,7 @@ func callJudge(cfg JudgeConfig, hits []string, texts []string) (JudgeVerdict, er
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(cfg.APIKey))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	client := &http.Client{Timeout: cfg.timeout()}
-	resp, err := client.Do(req)
+	resp, err := judgeHTTP(cfg.timeout()).Do(req)
 	if err != nil {
 		return JudgeVerdict{}, fmt.Errorf("judge request failed: %w", err)
 	}
