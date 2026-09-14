@@ -439,7 +439,7 @@ func (c *Client) recordFirewallHit(a *auth.Auth, rule, model, matchExcerpt strin
 }
 
 func (c *Client) recordFirewallHitMeta(a *auth.Auth, rule, model, matchExcerpt string, prepared []byte, observe bool, meta FirewallHitMeta) {
-	content := extractMessageText(prepared)
+	content := truncateRunes(extractMessageText(prepared), firewallContentMaxRunes)
 	snippet := strings.ReplaceAll(content, "\n", " ")
 	if r := []rune(snippet); len(r) > 80 {
 		snippet = string(r[:80]) + "…"

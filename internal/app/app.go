@@ -661,14 +661,14 @@ func (a *App) FirewallStats() map[string]any {
 	if !ok {
 		return empty
 	}
-	pager, ok := rt.Upstream.(interface {
-		FirewallEventsPaged(page, size int) ([]upstream.FirewallEvent, int)
+	statsAPI, ok := rt.Upstream.(interface {
+		FirewallLogStats() (int, int, map[string]int64)
 	})
 	if !ok {
 		return empty
 	}
 
-	// 60s 缓存（永久日志会增长，全量扫描不能每 30s 一次）
+	// 60s 缓存；计数走增量，不再全量扫 jsonl。
 	a.fwStatsMu.Lock()
 	if a.fwStatsCache != nil && time.Since(a.fwStatsAt) < time.Minute {
 		out := a.fwStatsCache
@@ -678,17 +678,7 @@ func (a *App) FirewallStats() map[string]any {
 	}
 	a.fwStatsMu.Unlock()
 
-	// 全量扫描永久日志聚合 total/today/rules
-	all, _ := pager.FirewallEventsPaged(0, 1_000_000)
-	today := time.Now().Format("2006-01-02")
-	todayN := 0
-	ruleCount := map[string]int64{}
-	for _, e := range all {
-		ruleCount[e.Rule]++
-		if time.Unix(e.At, 0).Format("2006-01-02") == today {
-			todayN++
-		}
-	}
+	total, todayN, ruleCount := statsAPI.FirewallLogStats()
 	type rc struct {
 		Rule  string `json:"rule"`
 		Count int64  `json:"count"`
@@ -700,7 +690,7 @@ func (a *App) FirewallStats() map[string]any {
 	sort.Slice(rules, func(i, j int) bool { return rules[i].Count > rules[j].Count })
 
 	out := map[string]any{
-		"total":  len(all),
+		"total":  total,
 		"today":  todayN,
 		"rules":  rules,
 		"events": []any{},

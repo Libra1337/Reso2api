@@ -5,6 +5,9 @@ services:
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
+      - GOMEMLIMIT=1200MiB
+      - GOGC=50
+    mem_limit: 1536m
     ports:
       # 容器内监听 0.0.0.0:7863；宿主机仅绑定回环，公网请走反代（见 README）
       - "127.0.0.1:7863:7863"

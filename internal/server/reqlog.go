@@ -16,6 +16,33 @@ import (
 	"time"
 )
 
+func readFileTail(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	size := fi.Size()
+	start := size - max
+	if start < 0 {
+		start = 0
+	}
+	buf := make([]byte, size-start)
+	if _, err := f.ReadAt(buf, start); err != nil {
+		return nil, err
+	}
+	if start > 0 {
+		if i := bytes.IndexByte(buf, '\n'); i >= 0 {
+			buf = buf[i+1:]
+		}
+	}
+	return buf, nil
+}
+
 // ReqLog 单次 API 调用记录。
 type ReqLog struct {
 	Time         string  `json:"time"`
@@ -52,7 +79,7 @@ func (s *reqLogStore) load() {
 	if s.path == "" {
 		return
 	}
-	if raw, err := os.ReadFile(s.path); err == nil {
+	if raw, err := readFileTail(s.path, 2<<20); err == nil {
 		for _, line := range bytes.Split(raw, []byte("\n")) {
 			line = bytes.TrimSpace(line)
 			if len(line) == 0 {
@@ -172,7 +199,7 @@ func (s *reqLogStore) Page(page, size int) ([]ReqLog, int) {
 	if page < 0 {
 		page = 0
 	}
-	raw, err := os.ReadFile(s.path)
+	raw, err := readFileTail(s.path, 4<<20)
 	if err != nil {
 		return nil, 0
 	}
