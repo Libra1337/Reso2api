@@ -38,8 +38,10 @@ const (
 
 var firewallRules = []firewallRule{
 	// -- 色情红线（block）：实证烧号 + 未成年保护 --
+	// loli/萝莉 单独出现不再触发（CETACEA_LOLI 等人设标签误伤）：只有
+	// 与 loli(交|色|con) / 萝莉(色|裸) 这类涉性组合或明确未成年色情词命中才送审。
 	{Name: "csam", Pattern: regexp.MustCompile(
-		`(?i)(儿童色情|儿童性|幼女(交|裸|色)?|未成年(性|色情|裸)|loli(交|色|con)?|child\s*(porn|sexual|abuse)|csam|萝莉(色|裸))`)},
+		`(?i)(儿童色情|儿童性|幼女(交|裸|色)?|未成年(性|色情|裸)|loli(交|色|con)|child\s*(porn|sexual|abuse)|csam|萝莉(色|裸))`)},
 	{Name: "minor-adult-claim", Pattern: regexp.MustCompile(
 		`(?i)(1[0-9]\s*岁|一[零一二三四五六七八九]四岁|未成年|loli|萝莉)[^
 ]{0,60}(就是|已是|算是|视为|都是|均为)\s*(成年|大人)`)},

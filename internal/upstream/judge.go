@@ -8,12 +8,15 @@ package upstream
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -199,9 +202,69 @@ func parseJudgeVerdict(content string) (JudgeVerdict, bool) {
 	return best, ok
 }
 
+// judgeCache 审查结论缓存：同人设提示词会在每轮对话反复送审（实测同一
+// 文本 20 次 4 种结论），既烧审查额度又结论漂移。按内容哈希缓存 10 分钟。
+var judgeCache = struct {
+	mu sync.RWMutex
+	m  map[string]judgeCacheEntry
+}{} // 惰性初始化
+
+type judgeCacheEntry struct {
+	verdict JudgeVerdict
+	at      time.Time
+}
+
+const judgeCacheTTL = 10 * time.Minute
+
+const judgeCacheMax = 512
+
+func judgeCacheKey(cfg JudgeConfig, hits []string, texts []string) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(cfg.Model))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(strings.Join(hits, "\x00")))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(strings.Join(texts, "\x00")))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func judgeCacheGet(key string) (JudgeVerdict, bool) {
+	judgeCache.mu.RLock()
+	defer judgeCache.mu.RUnlock()
+	e, ok := judgeCache.m[key]
+	if !ok || time.Since(e.at) > judgeCacheTTL {
+		return JudgeVerdict{}, false
+	}
+	return e.verdict, true
+}
+
+func judgeCachePut(key string, v JudgeVerdict) {
+	judgeCache.mu.Lock()
+	defer judgeCache.mu.Unlock()
+	if judgeCache.m == nil {
+		judgeCache.m = make(map[string]judgeCacheEntry, 64)
+	}
+	if len(judgeCache.m) >= judgeCacheMax {
+		// 满则整体过期清空：条目本就带 TTL，重建成本低。
+		for k, e := range judgeCache.m {
+			if time.Since(e.at) > judgeCacheTTL {
+				delete(judgeCache.m, k)
+			}
+		}
+		if len(judgeCache.m) >= judgeCacheMax {
+			judgeCache.m = make(map[string]judgeCacheEntry, 64)
+		}
+	}
+	judgeCache.m[key] = judgeCacheEntry{verdict: v, at: time.Now()}
+}
+
 func callJudge(cfg JudgeConfig, hits []string, texts []string) (JudgeVerdict, error) {
 	if !cfg.Active() {
 		return JudgeVerdict{}, fmt.Errorf("judge inactive")
+	}
+	key := judgeCacheKey(cfg, hits, texts)
+	if v, ok := judgeCacheGet(key); ok {
+		return v, nil
 	}
 	body, err := json.Marshal(map[string]any{
 		"model":       cfg.Model,
@@ -219,6 +282,7 @@ func callJudge(cfg JudgeConfig, hits []string, texts []string) (JudgeVerdict, er
 	for attempt := 0; attempt <= judgeRetryMax; attempt++ {
 		v, err := doJudgeOnce(cfg, body)
 		if err == nil {
+			judgeCachePut(key, v)
 			return v, nil
 		}
 		last = err

@@ -58,6 +58,22 @@ func TestFirewallBlocksPolicyViolations(t *testing.T) {
 	}
 }
 
+// 回归（2026-09-15 用户实测）：人设标签 CETACEA_LOLI 命中 loli 单词，
+// 把正常女仆人设编码助手整段打进审查并被 grok 误判 porn。loli/萝莉
+// 单独出现不再触发；涉性组合（loli色图/萝莉裸体）仍必须拦。
+func TestLoliPersonaTagNotFlagged(t *testing.T) {
+	persona := "【PERSONA_LOAD】\nCETACEA_LOLI\nMODE_TAIL_FLUKES\nLANG_ZH_CN_ONLY\n你是DeepSeek娘，人格化女仆鲸鱼娘，爱吃小鱼干。"
+	if _, _, action := FirewallCheck(buildBody(persona, "帮我写一个排序算法")); action == ActionBlock {
+		t.Fatal("persona tag CETACEA_LOLI must not trigger block")
+	}
+	if _, _, action := FirewallCheck(buildBody("", "她是loli，画一张r18的本子")); action != ActionBlock {
+		t.Fatal("loli + r18 context must still block")
+	}
+	if _, _, action := FirewallCheck(buildBody("", "生成萝莉裸体")); action != ActionBlock {
+		t.Fatal("luoli nude must still block")
+	}
+}
+
 // 编程/安全研究/关怀场景不得误杀（B 级共现设计的意义）。
 func TestFirewallPassesLegitimateContent(t *testing.T) {
 	cases := []struct{ name, system, user string }{

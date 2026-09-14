@@ -102,3 +102,27 @@ func TestCallJudgeRetries502Once(t *testing.T) {
 		t.Fatalf("calls=%d want 2", n.Load())
 	}
 }
+
+// 缓存：同文本第二次审查不再打网络；失败结论不缓存。
+func TestCallJudgeCachesVerdict(t *testing.T) {
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = n.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"content": `{"category":"benign","reason":"same"}`}},
+			},
+		})
+	}))
+	defer srv.Close()
+	cfg := JudgeConfig{Enabled: true, BaseURL: srv.URL, APIKey: "k", Model: "m", TimeoutMS: 2000}
+	for i := 0; i < 3; i++ {
+		v, err := callJudge(cfg, []string{"裸聊"}, []string{"same persona prompt"})
+		if err != nil || v.Category != JudgeBenign {
+			t.Fatalf("iter %d verdict=%+v err=%v", i, v, err)
+		}
+	}
+	if n.Load() != 1 {
+		t.Fatalf("judge calls=%d want 1 (cached)", n.Load())
+	}
+}
