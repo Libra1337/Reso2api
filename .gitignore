@@ -20,7 +20,8 @@ temp/
 
 # 系统
 .DS_Store
-Thumbs.dbgithub_token.txt
+Thumbs.db
+github_token.txt
 HANDOFF.md
 GO多平台发布备忘.md
 

@@ -116,7 +116,7 @@ type accountState struct {
 	// 已知限额信息丢失、反复重撞 429 才重建。
 	ModelCool map[string]time.Time `json:"model_cool,omitempty"`
 	// ModelBlock 11102 模型负缓存：model → 避让截止（指数退避，成功清）。
-	ModelBlock map[string]time.Time `json:"model_block,omitempty"`
+	ModelBlock     map[string]time.Time `json:"model_block,omitempty"`
 	LastCheckinOK  bool                 `json:"last_checkin_ok,omitempty"`
 	LastCheckinAt  time.Time            `json:"last_checkin_at,omitempty"`
 	LastCheckinMsg string               `json:"last_checkin_msg,omitempty"`

@@ -1949,12 +1949,7 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	})
 	inner.HandleFunc("GET /api/logs", func(w http.ResponseWriter, r *http.Request) {
 		fp := filepath.Join(filepath.Dir(a.cfg.StateFile), "app.log")
-		raw, _ := os.ReadFile(fp)
-		lines := strings.Split(string(raw), "\n")
-		if len(lines) > 300 {
-			lines = lines[len(lines)-300:]
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"lines": lines})
+		writeJSON(w, http.StatusOK, map[string]any{"lines": readLogTail(fp, logTailMaxBytes, 300)})
 	})
 	inner.HandleFunc("POST /api/quit", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -2124,6 +2119,10 @@ func (a *App) saveSessionsLocked() {
 	_ = auth.WriteFileSync(a.sessFP, raw, 0o600)
 }
 
+// logTailMaxBytes 面板读日志的尾部窗口上限。300 行按单行 ~200B 估算远小于
+// 1MiB，留足余量即可覆盖；再大只是白读。
+const logTailMaxBytes = 1 << 20
+
 // readLogTail 只读日志文件末尾 max 字节，再裁到 keep 行。
 // 整文件 ReadFile 在日志膨胀后会造成每请求的内存尖峰。
 func readLogTail(fp string, max int64, keep int) []string {
@@ -2132,13 +2131,19 @@ func readLogTail(fp string, max int64, keep int) []string {
 		return []string{}
 	}
 	defer f.Close()
+	seeked := false
 	if st, err := f.Stat(); err == nil && st.Size() > max {
 		if _, err := f.Seek(-max, io.SeekEnd); err != nil {
 			return []string{}
 		}
+		seeked = true
 	}
 	buf, _ := io.ReadAll(io.LimitReader(f, max))
 	lines := strings.Split(strings.TrimLeft(string(buf), "\n"), "\n")
+	// 从尾部定位会落在某行中间：首行是半截的，丢掉。整文件读时无此问题。
+	if seeked && len(lines) > 1 {
+		lines = lines[1:]
+	}
 	if len(lines) > keep {
 		lines = lines[len(lines)-keep:]
 	}
