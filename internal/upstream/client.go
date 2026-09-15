@@ -252,7 +252,12 @@ func (c *Client) doJSONWith(client *http.Client, req *http.Request) (json.RawMes
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// 读失败（连接中断/截断）→ 传输层错误：半截 body 不进 Classify/Unmarshal，
+	// 不参与账号惩罚（500 + 半截余额文案曾被误判 ErrHardCredit 长冷却罚号）。
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
 		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
@@ -369,7 +374,15 @@ func (c *Client) applyPrompt(body []byte) ([]byte, bool) {
 // 同请求重试一次；custom 模式 system 已被替换，重试中性兜底。
 // 11140 内容审核不在此列（换 system 无效，见 isSafetyBlock）。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
+	return c.ChatStreamConv(a, body, "")
+}
+
+// ChatStreamConv ChatStream 的会话感知版本：conversationID 用于 prompt_cache_key
+// 注入（body 自带 conversation_id 时以 body 为准），同账号同会话命中上游前缀缓存。
+func (c *Client) ChatStreamConv(a *auth.Auth, body []byte, conversationID string) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	prepared, degraded := c.applyPrompt(PrepareBodyOptWithEfforts(body, c.SanitizeFingerprints, c.effortsSnapshot()))
+	// prompt_cache_key（费用优化，上游实测 ~17×）：按账号隔离的稳定缓存键。
+	prepared = InjectPromptCacheKey(prepared, a.UID, conversationID)
 	// 内容防火墙：高危内容不出网关（上游拉黑是整号永久的，代价不可逆）。
 	if c.ContentFirewall {
 		if rule, excerpt, action := FirewallCheck(prepared); action != "" {
@@ -461,8 +474,14 @@ func (c *Client) chatOnce(a *auth.Auth, prepared []byte) (rc io.ReadCloser, stat
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		raw, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
+		if rerr != nil {
+			// 读失败（掐流/截断）→ 传输层错误：半截 body 不进 Classify，
+			// 否则半截错误文案会误判分类导致误罚号。
+			log.Printf("chat_stream uid=%s: read body: %v", a.UID, rerr)
+			return nil, 0, nil, fmt.Errorf("read body: %w", rerr)
+		}
 		kind := Classify(resp.StatusCode, string(raw))
 		log.Printf("chat_stream uid=%s: upstream %d %s body=%s",
 			a.UID, resp.StatusCode, kind, truncate(string(raw), 200))
@@ -498,7 +517,10 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("models api status %d: %s", resp.StatusCode, truncate(string(raw), 120))
 	}
@@ -770,7 +792,10 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("pricing api status %d: %s", resp.StatusCode, truncate(string(raw), 120))
 	}

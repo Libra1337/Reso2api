@@ -501,8 +501,9 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 	tried := map[string]bool{}
 	var lastErr error
 	var lastStatus int
-	var lastBody []byte              // 最后一次上游错误（轮转耗尽时按原状态透传）
-	routeModel := extractModel(body) // 出站裸模型名（6004 模型级冷却按它画界）
+	var lastBody []byte                   // 最后一次上游错误（轮转耗尽时按原状态透传）
+	routeModel := extractModel(body)      // 出站裸模型名（6004 模型级冷却按它画界）
+	convID := extractConversationID(body) // 会话标识：prompt_cache_key 注入源
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		acct := h.pickWithStickyForModel(rt, routeModel)
 		if acct == nil {
@@ -540,7 +541,7 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 			}
 			log.Printf("refresh success platform=%s uid=%s expires_at=%d", rt.Kind, acct.UID, acct.ExpiresAt)
 		}
-		rc, status, respBody, terr := rt.Upstream.ChatStream(acct, body)
+		rc, status, respBody, terr := provider.ChatStreamConv(rt.Upstream, acct, body, convID)
 		if terr != nil {
 			lastErr = terr
 			h.stickyClear(rt)
@@ -746,6 +747,25 @@ func extractModel(body []byte) string {
 	}
 	_ = json.Unmarshal(body, &s)
 	return s.Model
+}
+
+// extractConversationID 从请求体提取会话标识（metadata.conversation_id /
+// 顶层 conversation_id / conversationId 任一），供 prompt_cache_key 注入。
+func extractConversationID(body []byte) string {
+	var s struct {
+		Metadata struct {
+			ConversationID string `json:"conversation_id"`
+		} `json:"metadata"`
+		ConversationID  string `json:"conversation_id"`
+		ConversationID2 string `json:"conversationId"`
+	}
+	_ = json.Unmarshal(body, &s)
+	for _, v := range []string{s.Metadata.ConversationID, s.ConversationID, s.ConversationID2} {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func rewriteModel(body []byte, model string) ([]byte, error) {

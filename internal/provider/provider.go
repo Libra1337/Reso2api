@@ -94,6 +94,22 @@ type Upstream interface {
 	Aggregate(r io.Reader) (map[string]any, error)
 }
 
+// ConversationalUpstream 由支持会话感知出站的渠道可选实现：
+// conversationID 参与 prompt_cache_key 注入（同账号同会话命中上游前缀缓存，
+// 费用显著降低）。未实现该接口的渠道走 ChatStream（无缓存键）。
+type ConversationalUpstream interface {
+	ChatStreamConv(a *auth.Auth, body []byte, conversationID string) (rc io.ReadCloser, status int, respBody []byte, err error)
+}
+
+// ChatStreamConv 会话感知出站的入口适配：渠道实现 ConversationalUpstream
+// 时走会话版本，否则回落普通 ChatStream。
+func ChatStreamConv(u Upstream, a *auth.Auth, body []byte, conversationID string) (io.ReadCloser, int, []byte, error) {
+	if cu, ok := u.(ConversationalUpstream); ok {
+		return cu.ChatStreamConv(a, body, conversationID)
+	}
+	return u.ChatStream(a, body)
+}
+
 // ResourceItem 积分明细条目。
 type ResourceItem struct {
 	Name   string `json:"name"`

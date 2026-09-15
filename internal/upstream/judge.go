@@ -325,7 +325,10 @@ func doJudgeOnce(cfg JudgeConfig, body []byte) (JudgeVerdict, error) {
 		return JudgeVerdict{}, fmt.Errorf("judge request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return JudgeVerdict{}, fmt.Errorf("judge read body: %w", err)
+	}
 	if resp.StatusCode >= 400 {
 		return JudgeVerdict{}, fmt.Errorf("judge HTTP %d", resp.StatusCode)
 	}
