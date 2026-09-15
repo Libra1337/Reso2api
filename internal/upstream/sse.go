@@ -152,9 +152,9 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		"content": content.String(),
 	}
 	if reasoning.Len() > 0 {
-		// 双字段输出（reasoning_content + reasoning），兼容两派下游约定
+		// 只发 reasoning_content 单字段：同时发 reasoning+reasoning_content 双字段时，
+		// 累加型客户端（把两字段都拼进思考流）会逐段翻倍出现 "ThereThere's's" 乱码。
 		message["reasoning_content"] = reasoning.String()
-		message["reasoning"] = reasoning.String()
 	}
 	if len(toolOrder) > 0 {
 		sortInts(toolOrder)
@@ -304,12 +304,11 @@ func (rb *chunkRebuilder) rebuild(chunk map[string]any) map[string]any {
 		if s, ok := delta["content"].(string); ok && s != "" {
 			nd["content"] = s
 		}
-		// 推理内容双字段输出：DeepSeek/GLM/Kimi 约定 reasoning_content，
-		// OpenRouter/OpenAI 系约定 reasoning。两派都发，下游认哪个都能显示思考过程。
+		// 推理内容单字段输出 reasoning_content：上游若同帧带 reasoning（OpenAI 系别名）
+		// 只取其一；双字段同时发会被累加型客户端拼成逐段翻倍乱码。
 		for _, rk := range []string{"reasoning_content", "reasoning"} {
 			if s, ok := delta[rk].(string); ok && s != "" {
 				nd["reasoning_content"] = s
-				nd["reasoning"] = s
 				break
 			}
 		}

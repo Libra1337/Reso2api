@@ -164,8 +164,10 @@ func TestStreamErrorFramePassthrough(t *testing.T) {
 	}
 }
 
-// 回归：推理内容双字段输出（reasoning_content + reasoning），
-// 下游认哪派约定都能显示思考过程。
+// 回归（2026-09-15）：推理内容单字段输出 reasoning_content。
+// 双字段（reasoning_content + reasoning 同帧同值）会被累加型客户端拼成
+// 逐段翻倍乱码（"ThereThere's's"），故上游只发 reasoning 派也折叠为
+// reasoning_content 单字段。
 func TestStreamReasoningDualField(t *testing.T) {
 	raw := "data: {\"id\":\"r1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"thinking hard\"}}]}\n\n" +
 		"data: {\"id\":\"r1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"}}]}\n\n" +
@@ -179,10 +181,10 @@ func TestStreamReasoningDualField(t *testing.T) {
 	if !strings.Contains(body, `"reasoning_content":"thinking hard"`) {
 		t.Errorf("reasoning_content missing: %q", body)
 	}
-	if !strings.Contains(body, `"reasoning":"thinking hard"`) {
-		t.Errorf("reasoning missing: %q", body)
+	if strings.Contains(body, `"reasoning":`) {
+		t.Errorf("bare reasoning field must not be emitted: %q", body)
 	}
-	// 上游只发 reasoning（OpenRouter 派）时同样双字段输出
+	// 上游只发 reasoning（OpenRouter 派）时折叠为 reasoning_content 单字段
 	raw2 := "data: {\"id\":\"r2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"alt style\"}}]}\n\n" +
 		"data: [DONE]\n\n"
 	rec2 := httptest.NewRecorder()
@@ -190,8 +192,11 @@ func TestStreamReasoningDualField(t *testing.T) {
 		t.Fatal(err)
 	}
 	b2 := rec2.Body.String()
-	if !strings.Contains(b2, `"reasoning":"alt style"`) || !strings.Contains(b2, `"reasoning_content":"alt style"`) {
-		t.Errorf("alt-style reasoning not dual-emitted: %q", b2)
+	if !strings.Contains(b2, `"reasoning_content":"alt style"`) {
+		t.Errorf("alt-style reasoning not folded into reasoning_content: %q", b2)
+	}
+	if strings.Contains(b2, `"reasoning":`) {
+		t.Errorf("alt-style must not emit bare reasoning: %q", b2)
 	}
 }
 
