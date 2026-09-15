@@ -76,3 +76,37 @@ func TestFingerprintOverrides(t *testing.T) {
 		t.Errorf("device token priority wrong: %q", req.Header.Get("X-Device-Token"))
 	}
 }
+
+// TestInjectAccountStableHeaders X-Machine-ID/X-Session-ID 账号稳定派生：
+// 同 uid 跨调用恒定、异 uid 互异、空 uid 不注入（吸收自上游 3b87c14 的语义）。
+func TestInjectAccountStableHeaders(t *testing.T) {
+	mkReq := func() *http.Request {
+		req, _ := http.NewRequest(http.MethodPost, "https://www.codebuddy.cn/v2/chat/completions", nil)
+		return req
+	}
+	// 同 uid 稳定。
+	r1, r2 := mkReq(), mkReq()
+	injectAccountStableHeaders(r1, "u1")
+	injectAccountStableHeaders(r2, "u1")
+	if r1.Header.Get("X-Machine-ID") == "" || r1.Header.Get("X-Session-ID") == "" {
+		t.Fatal("应注入 X-Machine-ID / X-Session-ID")
+	}
+	if r1.Header.Get("X-Machine-ID") != r2.Header.Get("X-Machine-ID") {
+		t.Fatal("同 uid 派生应跨请求稳定（防多号被按设备指纹突变关联）")
+	}
+	if r1.Header.Get("X-Machine-ID") == r1.Header.Get("X-Session-ID") {
+		t.Fatal("machine/session 两个 purpose 应派生不同值")
+	}
+	// 异 uid 互异。
+	r3 := mkReq()
+	injectAccountStableHeaders(r3, "u2")
+	if r3.Header.Get("X-Machine-ID") == r1.Header.Get("X-Machine-ID") {
+		t.Fatal("异 uid 派生应互异（多号不折叠成同一设备）")
+	}
+	// 空 uid 不注入。
+	r4 := mkReq()
+	injectAccountStableHeaders(r4, "")
+	if r4.Header.Get("X-Machine-ID") != "" {
+		t.Fatal("空 uid 不应注入伪标识")
+	}
+}

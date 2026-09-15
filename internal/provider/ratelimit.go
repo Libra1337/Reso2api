@@ -51,3 +51,15 @@ func ParseSoftRateReset(body string) (time.Time, bool) {
 	}
 	return t, true
 }
+
+// blockModelCode 上游业务码 11102：该后端无此模型的确定性答复（非账号故障）。
+// 与 6004 的区别：6004 是「该模型用量超限，等重置」，11102 是「这个后端没有
+// 这个模型」，重试无意义——按 (账号, 模型) 写负缓存避让，指数退避。
+const blockModelCode = "11102"
+
+var blockModelRe = regexp.MustCompile(`"code"\s*:\s*"?` + blockModelCode + `"?`)
+
+// IsModelAbsent 报告 body 是否为 11102「该后端无此模型」。
+func IsModelAbsent(body string) bool {
+	return blockModelRe.MatchString(body)
+}

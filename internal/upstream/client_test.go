@@ -311,3 +311,20 @@ func TestChatStreamJudgeInactiveFailOpen(t *testing.T) {
 		t.Fatalf("upstream calls=%d want 1", calls)
 	}
 }
+
+// TestClassifyCreditsExhaustedPlural 复数形态词表（吸收自上游 0f49e29）：
+// "credits exhausted" 漏判会让坏号不冷却反复刷 402。
+func TestClassifyCreditsExhaustedPlural(t *testing.T) {
+	cases := []struct {
+		status int
+		body   string
+	}{
+		{402, `{"code":1,"msg":"credits exhausted, please top up"}`},
+		{200, `credits exhausted`},
+	}
+	for _, c := range cases {
+		if got := Classify(c.status, c.body); got != ErrHardCredit {
+			t.Errorf("Classify(%d, %q)=%v want ErrHardCredit", c.status, c.body, got)
+		}
+	}
+}

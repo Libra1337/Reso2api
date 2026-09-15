@@ -38,9 +38,9 @@ type Error = provider.Error
 
 // hardMarkers 余额不足关键词（小写比较 + 中文原文比较双通道）。
 var hardMarkers = []string{
-	"insufficient credit", "no credit", "credit exhausted", "out of credit",
-	"quota exceeded", "quota exhaust", "payment required", "credit not enough",
-	"not enough credit",
+	"insufficient credit", "no credit", "credit exhausted", "credits exhausted",
+	"out of credit", "quota exceeded", "quota exhaust", "payment required",
+	"credit not enough", "not enough credit",
 	"积分不足", "额度不足", "余额不足", "积分用完", "额度用尽", "没有积分",
 }
 

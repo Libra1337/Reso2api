@@ -43,3 +43,23 @@ func TestParseSoftRateReset(t *testing.T) {
 		t.Error("6004 without reset text must not parse")
 	}
 }
+
+// TestIsModelAbsent 11102「该后端无此模型」识别（JSON 空格/引号容差）。
+func TestIsModelAbsent(t *testing.T) {
+	cases := []struct {
+		body string
+		want bool
+	}{
+		{`{"code":11102,"msg":"model not found on this backend"}`, true},
+		{`{"code": "11102"}`, true},
+		{`{"code":"11102"}`, true},
+		{`{"code":6004,"msg":"将在 2026-09-16 00:00:00 重置"}`, false},
+		{`{"code":11128}`, false},
+		{`{"msg":"11102 mentioned in text only"}`, false},
+	}
+	for _, c := range cases {
+		if got := IsModelAbsent(c.body); got != c.want {
+			t.Errorf("IsModelAbsent(%s)=%v want %v", c.body, got, c.want)
+		}
+	}
+}

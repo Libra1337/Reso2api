@@ -305,3 +305,67 @@ func TestNoteContentBlockCircuitBreaker(t *testing.T) {
 		t.Fatalf("should be disabled with reason: %+v", st)
 	}
 }
+
+// TestBlockModelBackoffExponential 11102 负缓存：首次 6h、连击翻倍、封顶 24h、成功即清。
+func TestBlockModelBackoffExponential(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	m := "glm-5.3"
+
+	p.BlockModelBackoff("u1", m, "11102 model absent")
+	if !p.CooledForModel("u1", m) {
+		t.Fatal("首次退避后应处于模型负缓存")
+	}
+
+	// 连续命中：退避翻倍（mock 时间不可行，验证结构而非精确时长——第二次截止晚于第一次）。
+	p.mu.Lock()
+	first := p.byUID["u1"].modelBlock[m]
+	p.mu.Unlock()
+	p.BlockModelBackoff("u1", m, "11102 model absent")
+	p.mu.Lock()
+	second := p.byUID["u1"].modelBlock[m]
+	p.mu.Unlock()
+	if !second.After(first) {
+		t.Fatalf("连击应指数退避：second=%v first=%v", second, first)
+	}
+	// 封顶 24h。
+	p.mu.Lock()
+	if d := second.Sub(time.Now()); d > 24*time.Hour {
+		t.Fatalf("退避超封顶：%v", d)
+	}
+	p.mu.Unlock()
+
+	// 成功即清。
+	p.BlockModelClear("u1", m)
+	if p.CooledForModel("u1", m) {
+		t.Fatal("成功后负缓存应清除")
+	}
+	// 清除幂等：再次 Clear 不应崩。
+	p.BlockModelClear("u1", m)
+}
+
+// TestModelCoolPersisted 6004 模型级冷却持久化（saveLocked 漏存 bug 的回归）。
+func TestModelCoolPersisted(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	reset := time.Now().Add(2 * time.Hour)
+	p.CooldownSoftForModel("u1", reset, "m1", "6004 model rate limit")
+	p.saveLocked()
+
+	p2 := New(fp)
+	p2.load()
+	if !p2.CooledForModel("u1", "m1") {
+		t.Fatal("重启后 6004 模型冷却应恢复（saveLocked 曾漏存 modelCool）")
+	}
+	// 过期项不恢复。
+	late := time.Now().Add(-time.Minute)
+	p.CooldownSoftForModel("u1", late, "m2", "6004 model rate limit")
+	p.saveLocked()
+	p3 := New(fp)
+	p3.load()
+	if p3.CooledForModel("u1", "m2") {
+		t.Fatal("过期模型冷却不应恢复")
+	}
+}

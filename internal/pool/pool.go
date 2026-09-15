@@ -74,6 +74,10 @@ type entry struct {
 	// 只冷却触发模型，账号对其他模型保持可用。内存态，重启清零。
 	modelCool map[string]time.Time
 
+	// modelBlock 11102「该后端无此模型」的 (账号, 模型) 负缓存截止。
+	// 确定性答复重试无意义：指数退避避让（6h 起 ×2 封顶 24h），成功即清。
+	modelBlock map[string]time.Time
+
 	lastCheckinOK  bool
 	lastCheckinAt  time.Time
 	lastCheckinMsg string
@@ -90,11 +94,16 @@ func (e *entry) healthy(now time.Time) bool {
 }
 
 func (e *entry) cooledForModel(model string, now time.Time) bool {
-	if model == "" || e.modelCool == nil {
+	if model == "" {
 		return false
 	}
-	until, ok := e.modelCool[model]
-	return ok && now.Before(until)
+	if until, ok := e.modelCool[model]; ok && now.Before(until) {
+		return true // 6004 模型级限流冷却
+	}
+	if until, ok := e.modelBlock[model]; ok && now.Before(until) {
+		return true // 11102「该后端无此模型」负缓存避让
+	}
+	return false
 }
 
 // stateFile 持久化格式。
@@ -105,7 +114,9 @@ type accountState struct {
 	Until    time.Time `json:"until,omitempty"`
 	// ModelCool 模型级冷却（6004）：model → 重置墙钟。持久化避免重启后
 	// 已知限额信息丢失、反复重撞 429 才重建。
-	ModelCool      map[string]time.Time `json:"model_cool,omitempty"`
+	ModelCool map[string]time.Time `json:"model_cool,omitempty"`
+	// ModelBlock 11102 模型负缓存：model → 避让截止（指数退避，成功清）。
+	ModelBlock map[string]time.Time `json:"model_block,omitempty"`
 	LastCheckinOK  bool                 `json:"last_checkin_ok,omitempty"`
 	LastCheckinAt  time.Time            `json:"last_checkin_at,omitempty"`
 	LastCheckinMsg string               `json:"last_checkin_msg,omitempty"`
@@ -354,6 +365,65 @@ func (p *Pool) CooledForModel(uid, model string) bool {
 	return e.cooledForModel(model, time.Now())
 }
 
+// blockModelBackoffBase 11102 负缓存起始退避。
+const blockModelBackoffBase = 6 * time.Hour
+
+// blockModelBackoffMax 11102 负缓存退避封顶。
+const blockModelBackoffMax = 24 * time.Hour
+
+// BlockModelBackoff 记 11102「该后端无此模型」负缓存：该 (账号, 模型) 指数退避
+// （6h 起 ×2 封顶 24h）。选号与 6004 冷却同口径跳过（CooledForModel 合并判定），
+// 模型又通了（半开探测/正常请求成功）由 BlockModelClear 显式清除。
+// pool 需要记住上一次退避长度才能翻倍——同一 map 复用冷却值做下次基数。
+func (p *Pool) BlockModelBackoff(uid, model, reason string) {
+	if model == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	if e.modelBlock == nil {
+		e.modelBlock = map[string]time.Time{}
+	}
+	now := time.Now()
+	// 指数退避：上次截止若仍在未来，以 (上次截止-now) 为基数翻倍；过期则回到基数。
+	backoff := blockModelBackoffBase
+	if prev, ok := e.modelBlock[model]; ok && now.Before(prev) {
+		prevDur := prev.Sub(now)
+		if prevDur*2 > backoff {
+			backoff = prevDur * 2
+		}
+	}
+	if backoff > blockModelBackoffMax {
+		backoff = blockModelBackoffMax
+	}
+	e.modelBlock[model] = now.Add(backoff)
+	e.reason = reason
+	p.saveLocked()
+}
+
+// BlockModelClear 清除 (账号, 模型) 的 11102 负缓存（该模型实测又通了）。
+// 11102 的 Until 不含重置语义，负缓存只在成功路径清除，不做过期自动翻新。
+func (p *Pool) BlockModelClear(uid, model string) {
+	if model == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok || e.modelBlock == nil {
+		return
+	}
+	if _, exists := e.modelBlock[model]; !exists {
+		return
+	}
+	delete(e.modelBlock, model)
+	p.saveLocked()
+}
+
 // ModelCoolEntry 单账号在某模型上的冷却明细。
 // 注意：6004 限额是 账号×模型 各自独立的——此条目只表示
 // 该账号的该模型被限，不影响此账号其他模型、也不影响其他账号。
@@ -545,6 +615,12 @@ func (p *Pool) load() {
 				modelCool[m] = until // 过期项不恢复
 			}
 		}
+		modelBlock := map[string]time.Time{}
+		for m, until := range s.ModelBlock {
+			if now.Before(until) {
+				modelBlock[m] = until
+			}
+		}
 		p.byUID[uid] = &entry{
 			a:              &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
 			credits:        s.Credits,
@@ -552,6 +628,7 @@ func (p *Pool) load() {
 			reason:         s.Reason,
 			until:          s.Until,
 			modelCool:      modelCool,
+			modelBlock:     modelBlock,
 			lastCheckinOK:  s.LastCheckinOK,
 			lastCheckinAt:  s.LastCheckinAt,
 			lastCheckinMsg: s.LastCheckinMsg,
@@ -570,6 +647,8 @@ func (p *Pool) saveLocked() {
 			Disabled:       e.disabled,
 			Reason:         e.reason,
 			Until:          e.until,
+			ModelCool:      e.modelCool,
+			ModelBlock:     e.modelBlock,
 			LastCheckinOK:  e.lastCheckinOK,
 			LastCheckinAt:  e.lastCheckinAt,
 			LastCheckinMsg: e.lastCheckinMsg,

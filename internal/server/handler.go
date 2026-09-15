@@ -551,6 +551,17 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		if status >= 400 {
 			h.stickyClear(rt)
 			kind := rt.Upstream.Classify(status, string(respBody))
+			// 11102「该后端无此模型」：确定性答复，非账号故障——按 (账号, 模型)
+			// 写指数退避负缓存（6h 起 ×2 封顶 24h），同请求立刻换号。
+			// provider.IsModelAbsent 对非 workbuddy 渠道 body 不命中，零影响。
+			if routeModel != "" && provider.IsModelAbsent(string(respBody)) {
+				rt.Pool.BlockModelBackoff(acct.UID, routeModel, "11102 model absent")
+				log.Printf("model absent rotate platform=%s uid=%s model=%s (11102)",
+					rt.Kind, acct.UID, routeModel)
+				lastErr = &provider.Error{Kind: kind, Status: status, Msg: string(respBody)}
+				lastStatus, lastBody = status, respBody
+				continue
+			}
 			// 账号侧错误（限流/欠费/会话死/上游 5xx）：罚号并换号重试。
 			// 客户端侧错误（400 参数/404 模型名）：换号无意义，且可能来自
 			// 中转站模型探活——若罚号，单个客户端即可把整池打入冷却雪崩。
@@ -631,6 +642,10 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		}
 		brc.prefix = sink.Bytes()
 		rt.Pool.NoteSuccess(acct.UID)
+		// 11102 负缓存半开语义：成功即清（该模型实测又通了，避让立即解除）。
+		if routeModel != "" {
+			rt.Pool.BlockModelClear(acct.UID, routeModel)
+		}
 		h.stickySuccess(rt)
 		return brc, acct.UID, true
 	}

@@ -5,6 +5,8 @@
 package upstream
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"os"
 	"strings"
@@ -127,6 +129,28 @@ func (c *Client) injectDeviceToken(req *http.Request, a *auth.Auth) {
 	}
 }
 
+// deriveAccountStableID 按账号稳定派生设备/会话标识：sha256("wb2a:"+purpose+":"+uid)。
+//   - 跨重启稳定（固定盐，不随进程换）：上游按设备指纹跨会话关联多号时，
+//     同一账号始终呈现同一标识，不因重启"换设备"触发风控；
+//   - 账号互异：不同 uid 派生不同标识，多号不会被折叠成同一设备；
+//   - purpose="machine" → X-Machine-ID（设备级，跨会话稳定），
+//     purpose="session" → X-Session-ID（会话级，同账号稳定）。
+//     （吸收自上游 workbuddy2api 3b87c14，语义完全对齐。）
+func deriveAccountStableID(uid, purpose string) string {
+	sum := sha256.Sum256([]byte("wb2a:" + purpose + ":" + uid))
+	return hex.EncodeToString(sum[:16])
+}
+
+// injectAccountStableHeaders 注入 X-Machine-ID / X-Session-ID：按 uid 稳定派生。
+// uid 缺失时跳过（无账号语境的请求不发伪标识）。
+func injectAccountStableHeaders(req *http.Request, uid string) {
+	if uid == "" {
+		return
+	}
+	req.Header.Set("X-Machine-ID", deriveAccountStableID(uid, "machine"))
+	req.Header.Set("X-Session-ID", deriveAccountStableID(uid, "session"))
+}
+
 // ChatHeaders 在 common 之上加 chat 专属的账号头。
 // 缺省字段用 X-No-* 约定（与官方 CLI 一致）。
 func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth) {
@@ -155,6 +179,7 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth) {
 	}
 	c.injectAttribution(req)
 	c.injectDeviceToken(req, a)
+	injectAccountStableHeaders(req, s.UID)
 }
 
 // BillingHeaders billing/growth 接口请求头（字段取自快照，并发安全）。
