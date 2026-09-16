@@ -7,6 +7,8 @@
 package upstream
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"strings"
@@ -283,4 +285,32 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 		return messages, false
 	}
 	return out, true
+}
+
+// resaltCacheKey 给已注入的 prompt_cache_key 追加随机盐，返回改写后的 body。
+// 用途：11148 上游会话分叉（请求内配对完整但上游按「start a new conversation」
+// 拒收）时，换 cache key 即换上游会话，同请求重发。返回 nil 表示 body 无
+// prompt_cache_key（异常形态），调用方放弃重试。
+func resaltCacheKey(prepared []byte) []byte {
+	if len(prepared) == 0 {
+		return nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(prepared, &obj); err != nil {
+		return nil
+	}
+	key, ok := obj["prompt_cache_key"].(string)
+	if !ok || key == "" {
+		return nil
+	}
+	salt := make([]byte, 6)
+	if _, err := rand.Read(salt); err != nil {
+		return nil
+	}
+	obj["prompt_cache_key"] = key + "-r" + hex.EncodeToString(salt)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil
+	}
+	return out
 }

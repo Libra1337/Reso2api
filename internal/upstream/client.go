@@ -445,13 +445,22 @@ func (c *Client) ChatStreamConv(a *auth.Auth, body []byte, conversationID string
 		c.degradeTrigger()
 		return c.chatOnce(a, prompt.Rewrite(prepared, prompt.Degraded))
 	}
-	// 11148（tool_call_sequence_broken）：断流后客户端保存了半截 assistant
-	//（tool_call 无对应 tool result），每轮必 400。剥掉不配对的 tool 轨迹
-	// 同请求重发一次，救回坏会话（只重试一次，失败则如实透传）。
+	// 11148（tool_call_sequence_broken）两形态：
+	// a) 断流后客户端保存了半截 assistant（tool_call 无对应 tool result），每轮必
+	//    400。剥掉不配对的 tool 轨迹同请求重发一次。
+	// b) 请求内配对完整但仍 11148：上游把 prompt_cache_key 当会话标识，客户端
+	//    压缩/重写历史（context compaction）后与上游缓存的会话分叉，上游按提示
+	//    「start a new conversation」拒收（实测：换账号即新 cache key 后同请求
+	//    成功）。给 cache key 加盐强制开新会话，同请求重发一次。
+	// 两种都只重试一次，失败如实透传。
 	if status == http.StatusBadRequest && isBrokenToolSequence(respBody) {
 		if fixed, changed := repairToolSequence(prepared); changed {
 			log.Printf("chat_stream uid=%s: broken tool sequence (11148) -> repaired retry", a.UID)
 			return c.chatOnce(a, fixed)
+		}
+		if fresh := resaltCacheKey(prepared); fresh != nil {
+			log.Printf("chat_stream uid=%s: 11148 with intact pairing -> fresh conversation retry", a.UID)
+			return c.chatOnce(a, fresh)
 		}
 	}
 	return rc, status, respBody, err
