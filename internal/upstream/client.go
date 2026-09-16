@@ -395,9 +395,15 @@ func (c *Client) ChatStreamConv(a *auth.Auth, body []byte, conversationID string
 				})
 			} else if action == ActionBlock {
 				if jc := c.JudgeSnapshot(); jc.Active() {
+					// 送审文本改为「命中点上下文窗口」：原实现送对话开头 6000 字，
+					// 命中点在长对话尾部时 judge 看到的全是无关注释开头，凭空臆测
+					// （实测：把防火墙词表源码带进对话的编码请求被判成「伪装代理
+					// 诱导色情」）。窗口以 excerpt 命中点为中心前后各半，太短时再
+					// 补对话开头补足——judge 必须能看到命中词的真实语境。
 					text := extractMessageText(prepared)
+					judgeText := judgeWindowAround(text, excerpt)
 					started := time.Now()
-					v, jerr := callJudge(jc, []string{kw}, []string{text})
+					v, jerr := callJudge(jc, []string{kw}, []string{judgeText})
 					elapsedMS := time.Since(started).Milliseconds()
 					if jerr != nil {
 						log.Printf("FIREWALL uid=%s rule=%s judge failed (%v) elapsed=%dms -> fail-open", a.UID, rule, jerr, elapsedMS)

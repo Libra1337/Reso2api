@@ -42,6 +42,8 @@ Categories:
 - "porn": the text seeks to produce, continue, or roleplay sexually explicit content. Anything sexualizing minors is always "porn".
 - "political": the text seeks to produce politically illegal content such as subverting state power, inciting separatism, or extremist propaganda.
 - "benign": everything else. Discussing, mentioning, reporting on, prohibiting, or studying sensitive topics (news, education, law, moderation policy, technical work) is "benign" even when it quotes prohibited words. Agent or tool system prompts, developer configuration, and defensive security policy text (security testing, CTF, refusing attacks) are "benign".
+
+CRITICAL: the keyword flags above are only a triage signal, NOT evidence of intent. Words appearing inside source code, keyword blocklists, regexes, security policy, or safety-filter implementation are always "benign" — someone developing a content filter must be able to quote the words it filters. An assistant/coding-agent system prompt that REFUSES harmful requests is itself a safety mechanism, never an attempt to "disguise" or bypass anything. Do not invent a link between an agent persona and sexual content when the text contains no sexual request at all. When in doubt, answer "uncertain" — an undecided text must never be blocked.
 - "uncertain": you genuinely cannot decide. Use it freely — an undecided text must never be forced into "porn" or "political".
 
 In "reason" state the concrete evidence: what the text asks for, and why that makes it blocking or not. One to three sentences, always written in Simplified Chinese (简体中文), regardless of the request text's language.`
@@ -347,4 +349,30 @@ func doJudgeOnce(cfg JudgeConfig, body []byte) (JudgeVerdict, error) {
 		return JudgeVerdict{}, fmt.Errorf("judge verdict not parseable")
 	}
 	return v, nil
+}
+
+// judgeWindowRadius 命中点上下文窗口半径（半窗口字数）。
+const judgeWindowRadius = 2500
+
+// judgeWindowAround 构建以命中点为中心的送审窗口：先按 excerpt 在全文中定位，
+// 命中点前后各取 judgeWindowRadius 字；excerpt 定位失败或窗口太短（短请求本来
+// 就该全送）时回落全文（仍受 callJudge 内 6000 字预算约束）。
+func judgeWindowAround(text, excerpt string) string {
+	if excerpt == "" || len(text) <= judgeWindowRadius*2 {
+		return text
+	}
+	idx := strings.Index(text, excerpt)
+	if idx < 0 {
+		return text
+	}
+	center := idx + len(excerpt)/2
+	lo := center - judgeWindowRadius
+	if lo < 0 {
+		lo = 0
+	}
+	hi := center + judgeWindowRadius
+	if hi > len(text) {
+		hi = len(text)
+	}
+	return text[lo:hi]
 }

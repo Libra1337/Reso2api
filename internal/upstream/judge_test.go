@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -124,5 +125,42 @@ func TestCallJudgeCachesVerdict(t *testing.T) {
 	}
 	if n.Load() != 1 {
 		t.Fatalf("judge calls=%d want 1 (cached)", n.Load())
+	}
+}
+
+// TestJudgeWindowAround 送审窗口以命中点为中心：长文本命中在尾部时 judge 看到
+// 命中语境而非对话开头；短文本/定位失败回落全文。
+func TestJudgeWindowAround(t *testing.T) {
+	short := "hello world"
+	if got := judgeWindowAround(short, "world"); got != short {
+		t.Errorf("短文本应回落全文")
+	}
+	// 构造长文本：开头是 agent 系统提示词，尾部才是命中点。
+	var b strings.Builder
+	for i := 0; i < 1200; i++ {
+		b.WriteString("You are an interactive coding agent that helps with software engineering. ")
+	}
+	head := b.String()
+	text := head + "…末尾命中: \"child porn\", \"成人片\" 出现在词表源码里"
+	if len(text) <= judgeWindowRadius*2 {
+		t.Fatalf("前置条件失败：测试文本应超过窗口")
+	}
+	got := judgeWindowAround(text, "child porn")
+	if got == text {
+		t.Fatalf("长文本命中尾部不应送全文")
+	}
+	if !strings.Contains(got, "child porn") {
+		t.Error("窗口必须包含命中点")
+	}
+	if strings.Contains(got, "interactive coding agent that helps with software engineering. You are an interactive") {
+		// 允许窗口左缘覆盖少量开头，但 judge 主体不应还是纯开头段：
+		// 校验窗口中点附近是命中词而非纯 agent 提示词。
+		if idx := strings.Index(got, "child porn"); idx < len(got)/4 {
+			t.Errorf("命中词应靠近窗口中心，idx=%d len=%d", idx, len(got))
+		}
+	}
+	// excerpt 定位失败 → 全文。
+	if got := judgeWindowAround(text, "不存在的片段"); got != text {
+		t.Errorf("定位失败应回落全文")
 	}
 }
