@@ -39,11 +39,12 @@ func repairToolSequence(prepared []byte) ([]byte, bool) {
 		return prepared, false
 	}
 
-	fixed, changed := cleanupOrphanToolCalls(msgs)
-	if !changed {
+	repacked, repackChanged := repackToolResultBlocks(msgs)
+	cleaned, cleanChanged := cleanupOrphanToolCalls(repacked)
+	if !repackChanged && !cleanChanged {
 		return prepared, false
 	}
-	obj["messages"] = fixed
+	obj["messages"] = cleaned
 	raw, err := json.Marshal(obj)
 	if err != nil {
 		return prepared, false
@@ -203,4 +204,83 @@ func copyMsg(src map[string]any) map[string]any {
 		dst[k] = v
 	}
 	return dst
+}
+
+// repackToolResultBlocks 把插在 assistant.tool_calls 与其 tool 结果之间的非 tool
+// 消息挪到整组之后，保证同一批 tool_call 的结果在 wire 上连续。
+// 背景：Codex 的 image_resize_notice 特性会把 <image_resize_notice> 作为一条
+// developer/system 消息插在 tool 输出后面；并行调用时插在两份 tool 结果中间，
+// 上游判定配对断裂 400。重排只挪位置不删内容，删除语义仍归 cleanupOrphanToolCalls。
+func repackToolResultBlocks(messages []any) ([]any, bool) {
+	if len(messages) < 3 {
+		return messages, false
+	}
+	out := make([]any, 0, len(messages))
+	changed := false
+	i := 0
+	for i < len(messages) {
+		m, ok := messages[i].(map[string]any)
+		if !ok || m["role"] != "assistant" {
+			out = append(out, messages[i])
+			i++
+			continue
+		}
+		tcs, hasCalls := m["tool_calls"].([]any)
+		if !hasCalls || len(tcs) == 0 {
+			out = append(out, messages[i])
+			i++
+			continue
+		}
+		want := map[string]bool{}
+		for _, tci := range tcs {
+			if tc, ok := tci.(map[string]any); ok {
+				if id, _ := tc["id"].(string); id != "" {
+					want[id] = true
+				}
+			}
+		}
+		out = append(out, messages[i])
+		i++
+		var results []any
+		var between []any
+		sawNonTool := false
+		for i < len(messages) {
+			mm, ok := messages[i].(map[string]any)
+			if !ok {
+				break
+			}
+			role, _ := mm["role"].(string)
+			if role == "tool" {
+				id, _ := mm["tool_call_id"].(string)
+				if !want[id] {
+					break
+				}
+				results = append(results, messages[i])
+				if sawNonTool {
+					changed = true
+				}
+				i++
+				continue
+			}
+			if len(results) == 0 {
+				break // assistant 后没有结果：交由 cleanupOrphanToolCalls 处理
+			}
+			// 下一组 assistant.tool_calls 是新的组头，不能当插入物吞掉：
+			// 一旦收进 between，它自己那批结果就永远得不到重排。break 交还外层循环。
+			if role == "assistant" {
+				if next, _ := mm["tool_calls"].([]any); len(next) > 0 {
+					break
+				}
+			}
+			between = append(between, messages[i])
+			sawNonTool = true
+			i++
+		}
+		out = append(out, results...)
+		out = append(out, between...)
+	}
+	if !changed {
+		return messages, false
+	}
+	return out, true
 }

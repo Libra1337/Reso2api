@@ -37,6 +37,11 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 	normalizeToolChoice(obj)
 	normalizeRoles(obj)
 	normalizeStop(obj)
+	// max_completion_tokens -> max_tokens 翻译（吸收上游 PR #116）：OpenAI 新别名
+	// （o-series 起引入），DeepSeek Harness 等新客户端只发别名；WorkBuddy 上游只认
+	// max_tokens，别名透传被忽略后回落默认输出上限（实测 32000），长流任务被截。
+	// 显式 max_tokens 优先（别名只删）；别名非正数值不翻译。
+	translateMaxCompletionTokens(obj)
 	// DeepSeek 思维链开关（见 thinking.go）：注入 thinking.type=enabled + 缺档补默认档。
 	// 先于 normalizeReasoningEffort 执行：补入的默认档也要走既有降级管线，
 	// 模型不支持默认档时自动落到 ≤ 默认档的最高支持档（不出站不合规档位）。
@@ -232,5 +237,36 @@ func normalizeToolChoice(obj map[string]any) {
 		}
 	default:
 		delete(obj, "tool_choice")
+	}
+}
+
+// translateMaxCompletionTokens 把 OpenAI 别名 max_completion_tokens 翻译为上游
+// 认的 max_tokens（吸收上游 workbuddy2api PR #116）。
+// 规则：显式 max_tokens 优先（别名只删不译）；别名值为 0/null/负数/非数值不翻译
+//（0/null 语义是「未设置」，走上游默认；负数是非法值，翻译等于把垃圾搬进 max_tokens）；
+// 翻译后删别名字段（减少 body 体积与排障噪音）。
+func translateMaxCompletionTokens(obj map[string]any) {
+	alias, has := obj["max_completion_tokens"]
+	delete(obj, "max_completion_tokens")
+	if !has {
+		return
+	}
+	if _, explicit := obj["max_tokens"]; explicit {
+		return
+	}
+	// json.Unmarshal 数字 -> float64（整数去整后回写，避免科学计数法进上游 body）。
+	switch v := alias.(type) {
+	case float64:
+		if v > 0 && v == float64(int64(v)) {
+			obj["max_tokens"] = int64(v)
+		}
+	case int64:
+		if v > 0 {
+			obj["max_tokens"] = v
+		}
+	case int:
+		if v > 0 {
+			obj["max_tokens"] = int64(v)
+		}
 	}
 }
