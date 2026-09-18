@@ -16,7 +16,7 @@ import {
   PawPrint,
   ShieldAlert,
   ShieldCheck,
-  User,,
+  User,
   Globe,
 } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
