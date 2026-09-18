@@ -1,5 +1,14 @@
 import type { ApiError } from "@/types";
 
+
+export interface ProxyEntryUI {
+  addr: string;
+  user?: string;
+  pass?: string;
+  disabled?: boolean;
+  note?: string;
+}
+
 const API_BASE = "/api";
 
 let _csrfToken: string | null = null;
@@ -167,6 +176,12 @@ export const api = {
   tasks: () => request<import("@/types").TaskFeedResult>("/tasks"),
 
   limits: () => request<import("@/types").LimitsResult>("/limits"),
+
+  proxies: () => request<{ proxies: ProxyEntryUI[] }>("/proxies"),
+  saveProxies: (proxies: ProxyEntryUI[]) =>
+    request<{ ok: boolean; count: number }>("/proxies", { proxies }),
+  testProxy: (proxy: ProxyEntryUI) =>
+    request<{ ip: string; latency_ms: number }>("/proxies/test", { proxy }),
 
   activityRunAll: () =>
     request<import("@/types").SimpleResult>("/activity/run_all", {}),

@@ -16,7 +16,8 @@ import {
   PawPrint,
   ShieldAlert,
   ShieldCheck,
-  User,
+  User,,
+  Globe,
 } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useDashboardTheme } from "@/components/theme/theme-context";
@@ -38,6 +39,7 @@ const navItems = [
   { to: "/admin/school", label: "开学季", icon: GraduationCap },
   { to: "/admin/lottery", label: "抽奖", icon: Dices },
   { to: "/admin/usage", label: "用量统计", icon: BarChart3 },
+  { to: "/admin/proxies", label: "代理出口", icon: Globe },
   { to: "/admin/firewall", label: "防火墙", icon: ShieldAlert },
   { to: "/admin/logs", label: "运行日志", icon: ClipboardList },
 ];
@@ -53,6 +55,7 @@ const pageTitles: Record<string, string> = {
   "/admin/school": "开学季",
   "/admin/lottery": "抽奖",
   "/admin/usage": "用量统计",
+  "/admin/proxies": "代理出口",
   "/admin/firewall": "防火墙",
   "/admin/logs": "运行日志",
 };

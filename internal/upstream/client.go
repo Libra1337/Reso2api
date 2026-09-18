@@ -170,7 +170,7 @@ func (c *Client) setEfforts(m map[string][]string) {
 func New() *Client {
 	// 短 RPC（刷新/签到/余额/模型）：总超时 120s
 	tr := &http.Transport{
-		Proxy:               http.ProxyFromEnvironment,
+		Proxy:               ProxyFunc,
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 20,
 		IdleConnTimeout:     90 * time.Second,
@@ -178,7 +178,7 @@ func New() *Client {
 	}
 	// 聊天流专用：无总超时（长输出不被掐断），仅约束响应头与空闲连接
 	streamTr := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		Proxy:                 ProxyFunc,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   32,
 		IdleConnTimeout:       300 * time.Second,
@@ -247,6 +247,9 @@ func (c *Client) doJSONBilling(req *http.Request) (json.RawMessage, error) {
 }
 
 func (c *Client) doJSONWith(client *http.Client, req *http.Request) (json.RawMessage, error) {
+	if uid := req.Header.Get("X-WB-Proxy-UID"); uid != "" {
+		defer req.Header.Del("X-WB-Proxy-UID")
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -483,6 +486,8 @@ func (c *Client) chatOnce(a *auth.Auth, prepared []byte) (rc io.ReadCloser, stat
 		return nil, 0, nil, err
 	}
 	c.ChatHeaders(req, a)
+	req.Header.Set("X-WB-Proxy-UID", a.UID) // proxy.go 分流：出站 Transport 消费后删除
+	defer req.Header.Del("X-WB-Proxy-UID")
 	resp, err := c.streamClient().Do(req)
 	if err != nil {
 		log.Printf("chat_stream uid=%s: transport error: %v", a.UID, err)
@@ -527,6 +532,8 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
 	req.Header.Set("User-Agent", c.chatUA())
+	req.Header.Set("X-WB-Proxy-UID", a.UID) // proxy.go 分流（出站后删）
+	defer req.Header.Del("X-WB-Proxy-UID")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
@@ -636,6 +643,7 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 		return 0, err
 	}
 	c.BillingHeaders(req, a)
+	req.Header.Set("X-WB-Proxy-UID", a.UID) // proxy.go 分流
 	data, err := c.doJSONBilling(req)
 	if err != nil {
 		return 0, err
@@ -694,6 +702,7 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 		return 0, nil, err
 	}
 	c.BillingHeaders(req, a)
+	req.Header.Set("X-WB-Proxy-UID", a.UID) // proxy.go 分流
 	data, err := c.doJSONBilling(req)
 	if err != nil {
 		return 0, nil, err
@@ -768,6 +777,7 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 		return err
 	}
 	c.BillingHeaders(req, a)
+	req.Header.Set("X-WB-Proxy-UID", a.UID) // proxy.go 分流
 	_, err = c.doJSONBilling(req)
 	if err != nil {
 		log.Printf("workbuddy checkin failed uid=%s err=%v", a.UID, err)
@@ -802,6 +812,8 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 	req.Header.Set("Referer", origin+"/")
 	req.Header.Set("User-Agent", c.chatUA())
 	req.Header.Set("X-User-Id", a.UID)
+	req.Header.Set("X-WB-Proxy-UID", a.UID) // proxy.go 分流（出站后删）
+	defer req.Header.Del("X-WB-Proxy-UID")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err

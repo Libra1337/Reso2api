@@ -118,6 +118,9 @@ func main() {
 		qdPool.Add(a)
 	}
 
+	// 出站代理池（data/proxies.json，面板可热更新）：账号 uid 哈希固定分流。
+	upstream.LoadProxies(stateDir)
+
 	wbUp := upstream.New()
 	wbUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	wbUp.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints

@@ -1849,6 +1849,62 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			"imported": imported,
 		})
 	})
+	// ── 代理池管理（面板可换代理，热更新）────────────────────────
+	inner.HandleFunc("GET /api/proxies", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"proxies": upstream.ProxyList()})
+	})
+	inner.HandleFunc("POST /api/proxies", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Proxies []upstream.ProxyEntry 
+			Raw     string                // 支持粘贴 host:port:user:pass 批量文本
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体不是合法 JSON")
+			return
+		}
+		if len(req.Raw) > 0 {
+			// 每行一条：host:port[:user:pass]，# 开头注释忽略。
+			entries := make([]upstream.ProxyEntry, 0)
+			for _, line := range strings.Split(req.Raw, "\n") {
+				line = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line), "\\r"))
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				parts := strings.Split(line, ":")
+				if len(parts) < 2 {
+					continue
+				}
+				e := upstream.ProxyEntry{Addr: parts[0] + ":" + parts[1]}
+				if len(parts) >= 4 {
+					e.User, e.Pass = parts[2], parts[3]
+				}
+				entries = append(entries, e)
+			}
+			req.Proxies = entries
+		}
+		if err := upstream.SaveProxies(req.Proxies); err != nil {
+			apiError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(req.Proxies)})
+	})
+	inner.HandleFunc("POST /api/proxies/test", func(w http.ResponseWriter, r *http.Request) {
+		// 拨号测试：走指定代理访问 ifconfig.me 拿出口 IP（不挂 uid 头=直连池不适用，
+		// 直接用 ProxyFor 的池选路逻辑对面板提交的每条代理逐个测）。
+		var req struct {
+			Proxy upstream.ProxyEntry 
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Proxy.Addr == "" {
+			apiError(w, http.StatusBadRequest, "缺少 proxy.addr")
+			return
+		}
+		ip, ms, err := upstream.DialTest(req.Proxy)
+		if err != nil {
+			apiError(w, http.StatusBadGateway, "代理不可用: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ip": ip, "latency_ms": ms})
+	})
 	inner.HandleFunc("POST /api/account/ban_check", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UID string `json:"uid"`
