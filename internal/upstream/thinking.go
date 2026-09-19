@@ -112,6 +112,16 @@ func injectThinking(obj map[string]any) {
 	if !isDeepSeekModel(model) {
 		return
 	}
+	// 带图请求不注入思考（客户端显式开启的照常尊重）：视觉请求的思考期
+	// 长达 5-20s（视觉编码+推理），下游客户端/中转普遍只等首字节 ~1s、
+	// 正文 ~8-15s，等不到正文就掐流（实测 monoize 客户端 2h 掐 716 个请求，
+	// 含 3.2MB 带图请求；上游与网关全程正常，回答被客户端放弃）。
+	// 带图直答把正文首字压到 ~2-4s。
+	if requestHasImage(obj) {
+		if _, ok := obj["thinking"].(map[string]any); !ok {
+			return
+		}
+	}
 	th, ok := obj["thinking"].(map[string]any)
 	typ := ""
 	if ok {
@@ -126,6 +136,8 @@ func injectThinking(obj map[string]any) {
 			return // disabled：关思考且不带任何 effort（照抄客户端 case 行为）
 		}
 		ensureDeepSeekEffort(obj) // 显式 enabled 缺 effort → 补默认档
+		applyThinkingBudget(obj)  // 显式开思考同样受小预算保护（自带 budget 不覆盖）
+		stripSmallMaxTokens(obj)  // 过小 max_tokens 剥离（budget 不可靠，直接剥）
 		return
 	}
 	// 无 thinking（或 thinking 非法非对象值）或 thinking 对象 type 缺失/为空：
@@ -137,6 +149,57 @@ func injectThinking(obj map[string]any) {
 		th["type"] = "enabled"
 	}
 	ensureDeepSeekEffort(obj)
+	applyThinkingBudget(obj)
+	stripSmallMaxTokens(obj)
+}
+
+// minDeepSeekMaxTokens 小输出预算阈值：deepseek 开思考时 max_tokens 低于该值
+// 直接剥离（对齐 cline2api-workers 对同症的处理——Cline 免费 deepseek 通道
+// 带 max_tokens 一律 500 空响应，剥离后正常）。
+//
+// 实测 WorkBuddy 上游：max_tokens=300 时 thinking 可烧穿全部预算
+//（budget_tokens 上游不保证尊重，10 连发 3 次 think=300 content 空），
+// 剥掉 max_tokens 后思考自然结束、正文必有。剥离去掉的是客户端的截断上限，
+// 自然停止长度不受影响（测试类请求实际总输出 100-400 token）。
+const minDeepSeekMaxTokens = 1024
+
+// stripSmallMaxTokens deepseek 开思考时剥离过小的 max_tokens（见
+// minDeepSeekMaxTokens）。须在 thinking.type 确定为 enabled 后调用。
+func stripSmallMaxTokens(obj map[string]any) {
+	mt, ok := obj["max_tokens"].(float64)
+	if !ok || mt <= 0 || mt >= minDeepSeekMaxTokens {
+		return
+	}
+	delete(obj, "max_tokens")
+}
+
+// applyThinkingBudget 小 max_tokens 预算下限制思考预算，防思维链吃光输出预算
+// 导致正文为空（finish_reason=length、content 空串）。实测：客户端测试类请求
+// 只给 300 预算，effort=high 的思考可烧 300+ token，正文零余量；上游对
+// budget_tokens 大致尊重（实测 budget=100 → 思考 113 token 后正常出正文）。
+// 仅当：thinking.type=enabled、body 带正整数 max_tokens 且 ≤ 4096（大预算
+// 无需限制）、thinking 未自带 budget_tokens（客户端显式预算不覆盖）时注入
+// budget = max(64, max_tokens/3)，正文保留 ≥2/3 余量。
+func applyThinkingBudget(obj map[string]any) {
+	th, ok := obj["thinking"].(map[string]any)
+	if !ok {
+		return
+	}
+	if typ, _ := th["type"].(string); !strings.EqualFold(strings.TrimSpace(typ), "enabled") {
+		return
+	}
+	if _, has := th["budget_tokens"]; has {
+		return
+	}
+	mt, ok := obj["max_tokens"].(float64)
+	if !ok || mt <= 0 || mt > 4096 {
+		return
+	}
+	budget := int64(mt / 3)
+	if budget < 64 {
+		budget = 64
+	}
+	th["budget_tokens"] = budget
 }
 
 // ensureDeepSeekEffort 缺 effort 档位时补默认档（snake 优先，camel 兜底）。

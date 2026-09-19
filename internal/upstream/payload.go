@@ -42,6 +42,13 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 	// max_tokens，别名透传被忽略后回落默认输出上限（实测 32000），长流任务被截。
 	// 显式 max_tokens 优先（别名只删）；别名非正数值不翻译。
 	translateMaxCompletionTokens(obj)
+	// 多模态图片裸 base64 补全 data URL 前缀（见 images.go）：部分客户端发图
+	// 不带 "data:image/xxx;base64," 前缀，上游模型提供方直接 400 code=11133，
+	// 表现为视觉模型无法使用视觉功能。
+	normalizeImageURLs(obj)
+	// assistant 轮的图片上游直接丢弃（见 images.go）：挪到紧随其后的合成
+	// user 消息，模型才可见。
+	relocateAssistantImages(obj)
 	// DeepSeek 思维链开关（见 thinking.go）：注入 thinking.type=enabled + 缺档补默认档。
 	// 先于 normalizeReasoningEffort 执行：补入的默认档也要走既有降级管线，
 	// 模型不支持默认档时自动落到 ≤ 默认档的最高支持档（不出站不合规档位）。

@@ -78,6 +78,7 @@ func translateAnthropicToChat(src []byte) (chat []byte, model string, err error)
 				_ = json.Unmarshal(m.Content, &blocks)
 			}
 			var texts []string
+			var imageParts []any
 			var toolResults []map[string]any
 			for _, b := range blocks {
 				switch b["type"] {
@@ -86,8 +87,11 @@ func translateAnthropicToChat(src []byte) (chat []byte, model string, err error)
 						texts = append(texts, s)
 					}
 				case "image":
-					// 保留多模态图片（glm-5v 等可用）；其他模型上游自行忽略
-					texts = append(texts, "[image omitted]")
+					// 保留多模态图片（glm-5v-turbo / deepseek-v4.1-flash 等可用）；
+					// 非视觉模型上游自行忽略。
+					if part := anthropicImagePart(b); part != nil {
+						imageParts = append(imageParts, part)
+					}
 				case "tool_result":
 					toolResults = append(toolResults, b)
 				}
@@ -108,10 +112,21 @@ func translateAnthropicToChat(src []byte) (chat []byte, model string, err error)
 					Content:    mustJSON(anthropicContentToText(tr["content"])),
 				})
 			}
-			if len(texts) > 0 {
-				msgs = append(msgs, oaiMsg{Role: "user", Content: mustJSON(strings.Join(texts, "\n"))})
+			if len(texts) > 0 || len(imageParts) > 0 {
+				// 有图时 content 用多模态数组（text part + image parts），
+				// 纯文本保持字符串拼接不变。
+				var content any = strings.Join(texts, "\n")
+				if len(imageParts) > 0 {
+					arr := make([]any, 0, len(texts)+len(imageParts))
+					if len(texts) > 0 {
+						arr = append(arr, map[string]any{"type": "text", "text": strings.Join(texts, "\n")})
+					}
+					arr = append(arr, imageParts...)
+					content = arr
+				}
+				msgs = append(msgs, oaiMsg{Role: "user", Content: mustJSON(content)})
 			}
-			if len(blocks) > 0 && len(texts) == 0 && len(toolResults) == 0 {
+			if len(blocks) > 0 && len(texts) == 0 && len(toolResults) == 0 && len(imageParts) == 0 {
 				msgs = append(msgs, oaiMsg{Role: "user", Content: mustJSON("")})
 			}
 		case "assistant":
@@ -267,6 +282,15 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 	chatBody = nil
 	fbw := newFirstByteWriter(w, t0)
 	if peek.Stream {
+		// SSE 心跳：立刻下发注释行并冲刷，防下游 ~1s 首字节超时掐流（同
+		// chatCompletions；anthropicRelay 的响应头在此预先置好保持一致）。
+		hdr := fbw.Header()
+		hdr.Set("Content-Type", "text/event-stream")
+		hdr.Set("Cache-Control", "no-cache")
+		hdr.Set("Connection", "keep-alive")
+		hdr.Set("X-Accel-Buffering", "no")
+		_, _ = io.WriteString(fbw, ": keepalive\n\n")
+		fbw.Flush()
 		usage := anthropicRelay(fbw, rc, peek.Model)
 		h.finishReqLogFile(t0, "anthropic/"+peek.Model, rt.Kind.String(), uid, http.StatusOK, true, fbw.ttfb(), usage, bodyFile)
 		return
@@ -660,6 +684,40 @@ func anthropicContentToText(v any) string {
 		return strings.Join(parts, "\n")
 	}
 	return ""
+}
+
+// anthropicImagePart Anthropic image 块 → OpenAI image_url part。
+// source 只认 base64（拼 data URL）与 url（直传）两种形态；其余返回 nil。
+func anthropicImagePart(b map[string]any) map[string]any {
+	src, _ := b["source"].(map[string]any)
+	if src == nil {
+		return nil
+	}
+	switch src["type"] {
+	case "base64":
+		mt, _ := src["media_type"].(string)
+		data, _ := src["data"].(string)
+		if data == "" {
+			return nil
+		}
+		if mt == "" {
+			mt = "image/png"
+		}
+		return map[string]any{
+			"type":      "image_url",
+			"image_url": map[string]any{"url": "data:" + mt + ";base64," + data},
+		}
+	case "url":
+		u, _ := src["url"].(string)
+		if u == "" {
+			return nil
+		}
+		return map[string]any{
+			"type":      "image_url",
+			"image_url": map[string]any{"url": u},
+		}
+	}
+	return nil
 }
 
 func isJSONArray(raw json.RawMessage) bool {

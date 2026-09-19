@@ -215,3 +215,47 @@ func TestAnthropicFromAggregate(t *testing.T) {
 		t.Errorf("usage=%v", u)
 	}
 }
+
+// 图片块翻译：Anthropic base64/url image → OpenAI image_url part（不再丢弃为 [image omitted]）。
+func TestTranslateAnthropicImages(t *testing.T) {
+	src := `{
+		"model": "claude-sonnet-4",
+		"max_tokens": 100,
+		"messages": [{"role": "user", "content": [
+			{"type": "text", "text": "What is in this image?"},
+			{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "QUJD"}},
+			{"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}}
+		]}]
+	}`
+	chat, _, err := translateAnthropicToChat([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(chat)
+	if strings.Contains(s, "[image omitted]") {
+		t.Fatalf("图片被丢弃: %.200s", s)
+	}
+	if !strings.Contains(s, `"data:image/jpeg;base64,QUJD"`) {
+		t.Fatalf("base64 图片未转 data URL: %.300s", s)
+	}
+	if !strings.Contains(s, `"https://example.com/x.png"`) {
+		t.Fatalf("url 图片未透传: %.300s", s)
+	}
+	if !strings.Contains(s, `"type":"image_url"`) {
+		t.Fatalf("无 image_url part: %.300s", s)
+	}
+	// 纯文本消息仍是字符串 content，不被多模态化
+	chat2, _, err := translateAnthropicToChat([]byte(`{"model":"claude-sonnet-4","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p struct {
+		Messages []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	_ = json.Unmarshal(chat2, &p)
+	if len(p.Messages) != 1 || string(p.Messages[0].Content) != `"hi"` {
+		t.Fatalf("纯文本 content 形态改变: %.200s", chat2)
+	}
+}

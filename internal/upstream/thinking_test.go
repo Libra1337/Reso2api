@@ -326,3 +326,131 @@ func TestNormalizeStop(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyThinkingBudget 小 max_tokens 时注入思考预算，正文保留余量；
+// 大预算/无 max_tokens/客户端自带 budget/非 enabled 不动。
+func TestApplyThinkingBudget(t *testing.T) {
+	mk := func(mt any, thinking map[string]any) map[string]any {
+		obj := map[string]any{"model": "deepseek-v4.1-flash", "thinking": thinking}
+		if mt != nil {
+			obj["max_tokens"] = mt
+		}
+		return obj
+	}
+	cases := []struct {
+		name       string
+		mt         any
+		thinking   map[string]any
+		wantBudget any // nil = 期望不注入
+	}{
+		{"小预算300", float64(300), map[string]any{"type": "enabled"}, int64(100)},
+		{"下限64", float64(100), map[string]any{"type": "enabled"}, int64(64)},
+		{"边界4096", float64(4096), map[string]any{"type": "enabled"}, int64(1365)},
+		{"大预算8192不动", float64(8192), map[string]any{"type": "enabled"}, nil},
+		{"无max_tokens不动", nil, map[string]any{"type": "enabled"}, nil},
+		{"自带budget不覆盖", float64(300), map[string]any{"type": "enabled", "budget_tokens": 42}, 42},
+		{"disabled不动", float64(300), map[string]any{"type": "disabled"}, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			obj := mk(c.mt, c.thinking)
+			applyThinkingBudget(obj)
+			th := obj["thinking"].(map[string]any)
+			got, has := th["budget_tokens"]
+			if c.wantBudget == nil {
+				if has {
+					t.Fatalf("不应注入 budget，got %v", got)
+				}
+				return
+			}
+			if !has || got != c.wantBudget {
+				t.Fatalf("budget want %v got %v(has=%v)", c.wantBudget, got, has)
+			}
+		})
+	}
+}
+
+// TestInjectThinkingAddsBudget 端到端：InjectThinking 管线对小预算 deepseek 请求
+// 注入 type=enabled + budget_tokens。
+func TestInjectThinkingAddsBudget(t *testing.T) {
+	obj := map[string]any{
+		"model":      "deepseek-v4.1-flash",
+		"max_tokens": float64(300),
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	injectThinking(obj)
+	th, ok := obj["thinking"].(map[string]any)
+	if !ok || th["type"] != "enabled" {
+		t.Fatalf("thinking 未注入: %v", obj["thinking"])
+	}
+	if th["budget_tokens"] != int64(100) {
+		t.Fatalf("budget 未注入: %v", th)
+	}
+	if _, has := obj["max_tokens"]; has {
+		t.Fatalf("小 max_tokens 应被剥离: %v", obj["max_tokens"])
+	}
+}
+
+// TestInjectThinkingKeepsLargeMaxTokens 大 max_tokens（≥1024）保留并注入预算；
+// 非 deepseek 模型零改动。
+func TestInjectThinkingKeepsLargeMaxTokens(t *testing.T) {
+	obj := map[string]any{
+		"model":      "deepseek-v4.1-flash",
+		"max_tokens": float64(2048),
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	injectThinking(obj)
+	if obj["max_tokens"] != float64(2048) {
+		t.Fatalf("大 max_tokens 不应剥离: %v", obj["max_tokens"])
+	}
+	th := obj["thinking"].(map[string]any)
+	if th["budget_tokens"] != int64(682) {
+		t.Fatalf("budget 应为 2048/3=682: %v", th)
+	}
+	// 非 deepseek：max_tokens 与 thinking 均零改动
+	obj2 := map[string]any{
+		"model":      "glm-5.3",
+		"max_tokens": float64(300),
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	injectThinking(obj2)
+	if _, has := obj2["thinking"]; has {
+		t.Fatal("非 deepseek 不应注入 thinking")
+	}
+	if obj2["max_tokens"] != float64(300) {
+		t.Fatal("非 deepseek max_tokens 不应动")
+	}
+}
+
+// TestInjectThinkingSkipsImages 带图请求不注入思考（视觉+思考正文延迟 5-20s，
+// 下游客户端掐流）；客户端显式 thinking 不受影响。
+func TestInjectThinkingSkipsImages(t *testing.T) {
+	obj := map[string]any{
+		"model":      "deepseek-v4.1-flash",
+		"max_tokens": float64(300),
+		"messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "看图"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,QUJD"}},
+		}}},
+	}
+	injectThinking(obj)
+	if _, has := obj["thinking"]; has {
+		t.Fatal("带图请求不应注入 thinking")
+	}
+	// 客户端显式开启思考：尊重
+	obj["thinking"] = map[string]any{"type": "enabled"}
+	injectThinking(obj)
+	th := obj["thinking"].(map[string]any)
+	if th["type"] != "enabled" {
+		t.Fatal("显式 thinking 被改写")
+	}
+	// 纯文本对照：照常注入
+	txt := map[string]any{
+		"model":    "deepseek-v4.1-flash",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	injectThinking(txt)
+	if th2, ok := txt["thinking"].(map[string]any); !ok || th2["type"] != "enabled" {
+		t.Fatal("纯文本应注入 thinking")
+	}
+}

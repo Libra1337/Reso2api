@@ -16,11 +16,25 @@ import (
 // stripThinkSuffix 剥离模型名的 @think 后缀，返回剥后名称与是否带后缀。
 // 三种端点统一识别：chat completions 走标签包装，Anthropic/Responses 端点
 // 剥后缀走原生推理（避免后缀导致模型名无法解析而错误回退/404）。
+//
+// 同时剥离 -vl/-vision 视觉别名后缀（visionVariant 的入口侧）：部分客户端
+// （Cherry Studio / Open WebUI 等）按模型名字面启发式判断视觉能力（要含
+// vl/vision/4o 等字样），deepseek-v4.1-flash 这类名字会被判为不支持视觉、
+// 聊天里直接不发图（请求体无 image part，模型自然回答"没有图片"）。
+// 暴露 <model>-vl 别名让客户端放行图片，网关剥后缀路由到原模型。
 func stripThinkSuffix(model string) (string, bool) {
+	stripped := false
 	if strings.HasSuffix(model, "@think") {
-		return strings.TrimSuffix(model, "@think"), true
+		model = strings.TrimSuffix(model, "@think")
+		stripped = true
 	}
-	return model, false
+	for _, sfx := range []string{"-vl", "-vision"} {
+		if strings.HasSuffix(model, sfx) {
+			model = strings.TrimSuffix(model, sfx)
+			stripped = true
+		}
+	}
+	return model, stripped
 }
 
 // thinkTagWriter 包装 ResponseWriter，逐行改写 SSE data 帧。

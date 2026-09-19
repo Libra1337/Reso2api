@@ -309,6 +309,22 @@ func (h *Handler) modelList() []map[string]any {
 			if v, ok := thinkVariant(entry); ok {
 				out = append(out, v)
 			}
+			if v, ok := visionVariant(entry); ok {
+				out = append(out, v)
+			}
+			// 官方名别名（modelAliases 的反向暴露）：客户端按官方名判定
+			// 视觉能力（如 Kelivo 认 deepseek-flash），列表里没有则无法选用。
+			for alias, target := range modelAliases {
+				if strings.HasSuffix(id, "/"+target) || id == target {
+					av := make(map[string]any, len(entry))
+					for k, val := range entry {
+						av[k] = val
+					}
+					av["id"] = strings.TrimSuffix(id, target) + alias
+					out = append(out, av)
+					break
+				}
+			}
 		}
 	}
 	return out
@@ -328,6 +344,37 @@ func thinkVariant(entry map[string]any) (map[string]any, bool) {
 		v[k] = val
 	}
 	v["id"] = id + "@think"
+	return v, true
+}
+
+// visionModelSource 判断模型是否视觉可用且名字不含客户端可识别的视觉字样。
+// 客户端（Cherry Studio / Open WebUI 等）按名字启发式判定视觉能力，缺
+// vl/vision 字样的视觉模型在聊天里直接不发图；对这类模型暴露 -vl 别名。
+func visionModelSource(id string) bool {
+	lower := strings.ToLower(id)
+	if strings.HasSuffix(lower, "-vl") || strings.HasSuffix(lower, "-vision") {
+		return false // 已是别名，不再叠加
+	}
+	vision := strings.Contains(lower, "vl") || strings.Contains(lower, "vision") ||
+		strings.Contains(lower, "5v") || strings.Contains(lower, "4o") ||
+		strings.Contains(lower, "deepseek-v4.1")
+	nameSignalsVision := strings.Contains(lower, "vl") || strings.Contains(lower, "vision") ||
+		strings.Contains(lower, "4o")
+	return vision && !nameSignalsVision
+}
+
+// visionVariant 克隆视觉模型条目并追加 -vl 后缀（客户端视觉放行别名，
+// 入口侧由 stripThinkSuffix 剥离后路由到原模型）。
+func visionVariant(entry map[string]any) (map[string]any, bool) {
+	id, _ := entry["id"].(string)
+	if !visionModelSource(id) {
+		return nil, false
+	}
+	v := make(map[string]any, len(entry))
+	for k, val := range entry {
+		v[k] = val
+	}
+	v["id"] = id + "-vl"
 	return v, true
 }
 
@@ -440,6 +487,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	body = nil
 	fbw := newFirstByteWriter(w, t0)
 	if peek.Stream {
+		// SSE 心跳：立刻下发注释行并冲刷，防下游 ~1s 首字节超时掐流
+		//（实测 monoize 类客户端 1.01s cancel，2h 掐 716 个请求；注释行是
+		// 合法 SSE，所有解析器忽略）。响应头与 Stream() 输出保持一致。
+		hdr := fbw.Header()
+		hdr.Set("Content-Type", "text/event-stream")
+		hdr.Set("Cache-Control", "no-cache")
+		hdr.Set("Connection", "keep-alive")
+		hdr.Set("X-Accel-Buffering", "no")
+		_, _ = io.WriteString(fbw, ": keepalive\n\n")
+		fbw.Flush()
 		tee := &usageTee{}
 		var out http.ResponseWriter = fbw
 		var ttw *thinkTagWriter
@@ -671,6 +728,24 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 	return nil, "", false
 }
 
+// modelAliases 客户端生态已知官方名 → 网关实际模型名。部分客户端（如
+// Kelivo）按模型名硬编码判定视觉能力：DeepSeek V4.1 Flash 的官方名是
+// deepseek-flash（Kelivo 源码 _isDeepSeekVisionModel 只认 deepseek-flash /
+// deepseek-v4-flash），上游动态列表暴露的却是 deepseek-v4.1-flash——名字
+// 不匹配时客户端直接不把图片放进请求（canImageInput=false）。暴露并路由
+// 官方名别名让这类客户端放行图片。
+var modelAliases = map[string]string{
+	"deepseek-flash": "deepseek-v4.1-flash",
+}
+
+// resolveModelAlias 模型名别名归一（无别名原样返回）。
+func resolveModelAlias(name string) string {
+	if real, ok := modelAliases[name]; ok {
+		return real
+	}
+	return name
+}
+
 func (h *Handler) runtimeForModel(model string) (*Runtime, string, error) {
 	model = strings.TrimSpace(model)
 	parts := strings.SplitN(model, "/", 2)
@@ -683,11 +758,12 @@ func (h *Handler) runtimeForModel(model string) (*Runtime, string, error) {
 		if len(rt.Pool.List()) == 0 {
 			return nil, "", fmt.Errorf("provider %q has no account", kind)
 		}
-		return rt, parts[1], nil
+		return rt, resolveModelAlias(parts[1]), nil
 	}
 
 	// 裸模型名（无渠道前缀）：在已接入账号的渠道里自动解析。
 	// 优先按模型名精确命中（动态缓存 → 静态兜底）；无命中且仅有一个活跃渠道时按该渠道处理。
+	model = resolveModelAlias(model)
 	var hit *Runtime
 	var fallback *Runtime
 	active := 0

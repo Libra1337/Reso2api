@@ -151,7 +151,21 @@ func (s *reqLogStore) SetBodiesDir(dir string) {
 	}
 }
 
-// SaveBodyArchive 采样存档请求体（10% 概率；成功返回文件名）。
+// logAllBodies 调试开关：WB2A_LOG_ALL_BODIES 非空时请求体 100% 存档且
+// 单条上限放宽到 8MiB（默认 10% 采样 + 256KiB 截断，大图请求基本采不到，
+// 排查视觉问题时临时开启）。进程启动时求值一次。
+var logAllBodies = os.Getenv("WB2A_LOG_ALL_BODIES") != ""
+
+// bodyArchiveCap 单条存档上限（logAllBodies 时 8MiB，覆盖接近入口
+// chatBodyLimit 的带图大请求）。
+func bodyArchiveCap() int {
+	if logAllBodies {
+		return 8 << 20
+	}
+	return 256 * 1024
+}
+
+// SaveBodyArchive 采样存档请求体（默认 10% 概率；成功返回文件名）。
 // 存档永不删除——"请求日志永久保留且可回看完整内容"的一部分。
 func (s *reqLogStore) SaveBodyArchive(body []byte) string {
 	if s.bodies == "" || len(body) == 0 {
@@ -159,11 +173,11 @@ func (s *reqLogStore) SaveBodyArchive(body []byte) string {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if randIntn(10) != 0 { // 10% 采样
+	if !logAllBodies && randIntn(10) != 0 { // 10% 采样
 		return ""
 	}
-	if r := []rune(string(body)); len(r) > 256*1024 { // 单条 256KiB 上限
-		trunc := string([]rune(string(body))[:256*1024]) + "\n…（过长截断）"
+	if r := []rune(string(body)); len(r) > bodyArchiveCap() { // 单条上限
+		trunc := string([]rune(string(body))[:bodyArchiveCap()]) + "\n…（过长截断）"
 		body = []byte(trunc)
 	}
 	name := fmt.Sprintf("%d-%s.json", time.Now().UnixMilli(), randHex4())
