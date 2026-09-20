@@ -184,7 +184,7 @@ func (h *Handler) pickWithSticky(rt *Runtime) *auth.Auth {
 	return h.pickWithStickyForModel(rt, "", "")
 }
 
-func (h *Handler) pickWithStickyForModel(rt *Runtime, model, session string) *auth.Auth {
+func (h *Handler) pickWithStickyForModel(rt *Runtime, model, session string, body []byte) *auth.Auth {
 	const defaultMaxReqs = 50
 
 	key := h.stickyKey(rt.Kind, session)
@@ -207,7 +207,7 @@ func (h *Handler) pickWithStickyForModel(rt *Runtime, model, session string) *au
 		}
 	}
 
-	acct := rt.Pool.PickExcludingForModel(nil, model)
+	acct := h.pickFresh(rt, nil, model, body)
 	if acct == nil {
 		return nil
 	}
@@ -573,6 +573,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		h.finishReqLogFile(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, true, fbw.ttfb(), tee.snapshot(), bodyFile)
+		h.noteQuality(rt, uid, tee)
 		_ = err
 		return
 	}
@@ -586,7 +587,96 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	usage, _ := resp["usage"].(map[string]any)
 	h.finishReqLogFile(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, false, 0, usage, bodyFile)
+	h.noteQualityMap(rt, uid, usage, respToolCalled(resp))
 	writeJSON(fbw, http.StatusOK, resp)
+}
+
+// heavyBody 重任务判定：出站 body 超过 150KB（约 5 万 token）。
+func heavyBody(body []byte) bool { return len(body) > 150*1024 }
+
+// pickFresh 换号选号：重任务时优先避开质量降级中的账号（全员降级则退化普通选号）。
+func (h *Handler) pickFresh(rt *Runtime, tried map[string]bool, model string, body []byte) *auth.Auth {
+	if heavyBody(body) {
+		return rt.Pool.PickExcludingForModelHeavy(tried, model)
+	}
+	return rt.Pool.PickExcludingForModel(tried, model)
+}
+
+// noteQuality 流式收尾的质量降级判定：大输入 200 完成，但输出 <1000 tokens、
+// 无 tool_calls、finish 不是 tool_calls——上游对该号静默降质（思考半截直出、
+// 计划模式断流）。记一次质量降级：该号 30min 内避开重任务，10min 内 3 次则
+// 整体冷却 10min 逼粘性会话换号。
+func (h *Handler) noteQuality(rt *Runtime, uid string, tee *usageTee) {
+	if uid == "" {
+		return
+	}
+	u := tee.snapshot()
+	if u == nil {
+		return
+	}
+	inTok, _ := toInt64(u["prompt_tokens"])
+	outTok, _ := toInt64(u["completion_tokens"])
+	if inTok < 50_000 || outTok >= 1_000 {
+		return
+	}
+	if tee.toolSeen() || tee.finishReason() == "tool_calls" {
+		return
+	}
+	rt.Pool.NoteQualityDegraded(uid)
+	log.Printf("quality degraded platform=%s uid=%s in=%d out=%d finish=%s -> heavy-avoid 30m",
+		rt.Kind, uid, inTok, outTok, tee.finishReason())
+}
+
+// noteQualityMap 非流式版本。
+func (h *Handler) noteQualityMap(rt *Runtime, uid string, usage map[string]any, toolCalled bool) {
+	if uid == "" || usage == nil {
+		return
+	}
+	inTok, _ := toInt64(usage["prompt_tokens"])
+	outTok, _ := toInt64(usage["completion_tokens"])
+	if inTok < 50_000 || outTok >= 1_000 {
+		return
+	}
+	if toolCalled {
+		return
+	}
+	rt.Pool.NoteQualityDegraded(uid)
+	log.Printf("quality degraded platform=%s uid=%s in=%d out=%d (non-stream) -> heavy-avoid 30m",
+		rt.Kind, uid, inTok, outTok)
+}
+
+// respToolCalled 非流式响应里是否有 tool_calls。
+func respToolCalled(resp map[string]any) bool {
+	choices, _ := resp["choices"].([]any)
+	for _, ci := range choices {
+		c, ok := ci.(map[string]any)
+		if !ok {
+			continue
+		}
+		msg, _ := c["message"].(map[string]any)
+		if msg == nil {
+			continue
+		}
+		if tcs, ok := msg["tool_calls"].([]any); ok && len(tcs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func toInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int64(n), true
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case json.Number:
+		i, err := n.Int64()
+		return i, err == nil
+	}
+	return 0, false
 }
 
 // wrapThinkTag 非流式：把 message 的推理内容并入正文 <think> 标签，删除推理字段。
@@ -640,13 +730,13 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		return nil, "", false
 	}
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		acct := h.pickWithStickyForModel(rt, routeModel, session)
+		acct := h.pickWithStickyForModel(rt, routeModel, session, body)
 		if acct == nil {
 			break
 		}
 		if tried[acct.UID] || rt.Pool.CooledForModel(acct.UID, routeModel) {
 			h.stickyClear(rt, session)
-			acct = rt.Pool.PickExcludingForModel(tried, routeModel)
+			acct = h.pickFresh(rt, tried, routeModel, body)
 			if acct == nil {
 				break
 			}

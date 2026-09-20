@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
+      - WB2A_LOG_ALL_BODIES=1
       - GOMEMLIMIT=2400MiB
       - GOGC=50
     mem_limit: 2800m

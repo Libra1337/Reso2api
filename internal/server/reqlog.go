@@ -310,7 +310,10 @@ type usageTee struct {
 	mu      sync.Mutex
 	buf     []byte
 	usage   map[string]any
-	finished bool
+	finished bool // 正常收尾（finish_reason/[DONE]）——中断补帧判断
+	sawTool bool // 流中出现过 tool_calls 增量（质量熔断）
+	finish  string
+	finishSet bool
 }
 
 func (t *usageTee) Write(p []byte) (int, error) {
@@ -330,17 +333,25 @@ func (t *usageTee) Write(p []byte) (int, error) {
 				continue
 			}
 			var chunk struct {
+				Usage   map[string]any `json:"usage"`
 				Choices []struct {
-					FinishReason any `json:"finish_reason"`
+					Delta struct {
+						ToolCalls []any `json:"tool_calls"`
+					} `json:"delta"`
+					FinishReason *string `json:"finish_reason"`
 				} `json:"choices"`
-				Usage map[string]any `json:"usage"`
 			}
 			if json.Unmarshal([]byte(payload), &chunk) == nil {
 				if chunk.Usage != nil {
 					t.usage = chunk.Usage
 				}
-				for _, ch := range chunk.Choices {
-					if ch.FinishReason != nil {
+				for _, c := range chunk.Choices {
+					if len(c.Delta.ToolCalls) > 0 {
+						t.sawTool = true
+					}
+					if c.FinishReason != nil && *c.FinishReason != "" {
+						t.finish = *c.FinishReason
+						t.finishSet = true
 						t.finished = true
 					}
 				}
@@ -361,6 +372,19 @@ func (t *usageTee) snapshot() map[string]any {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.usage
+}
+
+// toolSeen 流中是否出现过 tool_calls；finishReason 最后一次非空 finish。
+func (t *usageTee) toolSeen() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.sawTool
+}
+
+func (t *usageTee) finishReason() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.finish
 }
 
 // teeReadCloser 读取 rc 的同时把字节喂给 w（io.TeeReader 的 ReadCloser 版）。

@@ -78,6 +78,14 @@ type entry struct {
 	// 确定性答复重试无意义：指数退避避让（6h 起 ×2 封顶 24h），成功即清。
 	modelBlock map[string]time.Time
 
+	// heavyUntil 输出质量降级冷却截止（内存态）：大输入请求 200 但输出被
+	// 上游静默压缩（思考半截、无 tool_calls）。期间该号不接重任务（大请求），
+	// 轻任务（签到/短请求）照常——降质号减负，而不是整号冷却断流。
+	heavyUntil time.Time
+
+	// qualityFails 最近输出质量降级时间戳（内存态，10min 滚动窗）。
+	qualityFails []time.Time
+
 	lastCheckinOK  bool
 	lastCheckinAt  time.Time
 	lastCheckinMsg string
@@ -91,6 +99,11 @@ func (e *entry) healthy(now time.Time) bool {
 		return false
 	}
 	return true
+}
+
+// heavyAvoiding 是否处于「重任务规避」窗口（质量降级中）。
+func (e *entry) heavyAvoiding(now time.Time) bool {
+	return !e.heavyUntil.IsZero() && now.Before(e.heavyUntil)
 }
 
 func (e *entry) cooledForModel(model string, now time.Time) bool {
@@ -191,6 +204,19 @@ func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 
 // PickExcludingForModel 按模型选号：跳过 tried，以及对该模型处于 6004 冷却的账号。
 func (p *Pool) PickExcludingForModel(tried map[string]bool, model string) *auth.Auth {
+	return p.pick(tried, model, false)
+}
+
+// PickExcludingForModelHeavy 重任务选号：额外跳过「质量降级中」的账号；
+// 全员降级时退化为普通选号（不因规避而断服）。
+func (p *Pool) PickExcludingForModelHeavy(tried map[string]bool, model string) *auth.Auth {
+	if a := p.pick(tried, model, true); a != nil {
+		return a
+	}
+	return p.pick(tried, model, false)
+}
+
+func (p *Pool) pick(tried map[string]bool, model string, avoidHeavy bool) *auth.Auth {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
@@ -200,6 +226,9 @@ func (p *Pool) PickExcludingForModel(tried map[string]bool, model string) *auth.
 			continue
 		}
 		if !e.healthy(now) {
+			continue
+		}
+		if avoidHeavy && e.heavyAvoiding(now) {
 			continue
 		}
 		if e.cooledForModel(model, now) {
@@ -301,6 +330,32 @@ func (p *Pool) Remove(uid string) {
 }
 
 // NoteError 记录一次非余额/非 429 错误；达到 threshold 自动冷却 d 时长。
+// NoteQualityDegraded 记一次输出质量降级：heavy 窗口内避开重任务；
+// 连续多次（qualityFails ≥ 3/10min）升级为短暂整体冷却，把粘性会话逼换号。
+func (p *Pool) NoteQualityDegraded(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	now := time.Now()
+	// 清掉过期计数
+	keep := e.qualityFails[:0]
+	for _, t := range e.qualityFails {
+		if now.Sub(t) < 10*time.Minute {
+			keep = append(keep, t)
+		}
+	}
+	e.qualityFails = append(keep, now)
+	e.heavyUntil = now.Add(30 * time.Minute)
+	p.saveLocked()
+	if len(e.qualityFails) >= 3 {
+		e.until = now.Add(10 * time.Minute)
+		e.reason = "quality degraded x3"
+	}
+}
+
 func (p *Pool) NoteError(uid string, threshold int, d time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
