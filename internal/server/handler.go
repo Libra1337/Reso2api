@@ -520,6 +520,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	requestedModel := peek.Model
 	var thinkTag bool
 	peek.Model, thinkTag = stripThinkSuffix(peek.Model)
+	// 裸 deepseek 默认 <think> 包装（网关强制开思考 + reasoning_content 非 OpenAI
+	// 标准字段，思维链会漏进不认识它的客户端正文）。@nothink 后缀显式关闭。
+	if strings.HasPrefix(strings.ToLower(peek.Model), "deepseek") && !strings.HasSuffix(peek.Model, "@nothink") {
+		thinkTag = true
+	}
+	peek.Model = strings.TrimSuffix(peek.Model, "@nothink")
 	rt, model, err := h.runtimeForModel(peek.Model)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_model", err.Error())
