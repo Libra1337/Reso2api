@@ -265,7 +265,24 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 				continue
 			}
 			if len(results) == 0 {
-				break // assistant 后没有结果：交由 cleanupOrphanToolCalls 处理
+				// 首个结果之前只允许：空占位（删除）或新批头（交还外层）；
+				// 其余消息挡道（空 assistant 占位、有内容的 assistant/user）
+				// 上游一律判配对断裂 11148——占位删除，有内容的挪到结果之后。
+				if isEmptyPlaceholder(mm) {
+					changed = true
+					i++
+					continue
+				}
+				if role == "assistant" {
+					if next, _ := mm["tool_calls"].([]any); len(next) > 0 {
+						break // 新批头：交还外层处理它自己的结果组
+					}
+				}
+				between = append(between, messages[i])
+				sawNonTool = true
+				changed = true
+				i++
+				continue
 			}
 			// 下一组 assistant.tool_calls 是新的组头，不能当插入物吞掉：
 			// 一旦收进 between，它自己那批结果就永远得不到重排。break 交还外层循环。
@@ -313,4 +330,28 @@ func resaltCacheKey(prepared []byte) []byte {
 		return nil
 	}
 	return out
+}
+
+// isEmptyPlaceholder 无信息量占位消息：非 user/tool，且 content/reasoning/
+// tool_calls 全空（或缺失）。ZCode/Codex 断流重连后会在 assistant(tool_calls)
+// 与结果之间插入一条空 assistant，上游对这种形态判 11148。
+func isEmptyPlaceholder(m map[string]any) bool {
+	role, _ := m["role"].(string)
+	if role == "user" || role == "tool" {
+		return false
+	}
+	if tcs, ok := m["tool_calls"].([]any); ok && len(tcs) > 0 {
+		return false
+	}
+	for _, k := range []string{"content", "reasoning", "reasoning_content"} {
+		if v, ok := m[k]; ok {
+			if s, isStr := v.(string); isStr && strings.TrimSpace(s) != "" {
+				return false
+			}
+			if arr, isArr := v.([]any); isArr && len(arr) > 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
