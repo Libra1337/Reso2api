@@ -3,7 +3,7 @@
 // 背景：部分客户端（部分中转站 / 第三方 GUI）发图时 image_url.url 只给
 // 裸 base64，不带 "data:image/xxx;base64," 前缀。WorkBuddy 上游
 // /v2/chat/completions 的模型提供方对这种形态直接 400 code=11133
-//（"the request parameters were rejected by the model provider"），
+// （"the request parameters were rejected by the model provider"），
 // 表现为「视觉模型（glm-5v-turbo / deepseek-v4.1-flash 等）反代后无法
 // 使用视觉功能」。网关出站前按 base64 魔数嗅探补全 data URL 前缀；
 // 已带 scheme（data:/http: 等）、过短或未命中已知魔数的值一律不动，

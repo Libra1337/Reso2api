@@ -32,11 +32,11 @@ func TestVisionVariantAndSuffix(t *testing.T) {
 		id   string
 		want bool
 	}{
-		{"workbuddy/deepseek-v4.1-flash", true},  // 视觉模型、名字无视觉字样 → 需要 -vl 别名
-		{"workbuddy/glm-5v-turbo", true},          // "5v" 是视觉标记但客户端未必识别 → 也给别名
-		{"workbuddy/deepseek-v4-pro", false},      // 非视觉
+		{"workbuddy/deepseek-v4.1-flash", true},     // 视觉模型、名字无视觉字样 → 需要 -vl 别名
+		{"workbuddy/glm-5v-turbo", true},            // "5v" 是视觉标记但客户端未必识别 → 也给别名
+		{"workbuddy/deepseek-v4-pro", false},        // 非视觉
 		{"workbuddy/deepseek-v4.1-flash-vl", false}, // 已是别名不叠加
-		{"workbuddy/glm-5.3", false},              // 非视觉
+		{"workbuddy/glm-5.3", false},                // 非视觉
 	}
 	for _, c := range cases {
 		entry := map[string]any{"id": c.id}

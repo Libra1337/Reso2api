@@ -250,7 +250,7 @@ func normalizeToolChoice(obj map[string]any) {
 // translateMaxCompletionTokens 把 OpenAI 别名 max_completion_tokens 翻译为上游
 // 认的 max_tokens（吸收上游 workbuddy2api PR #116）。
 // 规则：显式 max_tokens 优先（别名只删不译）；别名值为 0/null/负数/非数值不翻译
-//（0/null 语义是「未设置」，走上游默认；负数是非法值，翻译等于把垃圾搬进 max_tokens）；
+// （0/null 语义是「未设置」，走上游默认；负数是非法值，翻译等于把垃圾搬进 max_tokens）；
 // 翻译后删别名字段（减少 body 体积与排障噪音）。
 func translateMaxCompletionTokens(obj map[string]any) {
 	alias, has := obj["max_completion_tokens"]

@@ -17,6 +17,7 @@ const (
 	WorkBuddy Kind = "workbuddy"
 	TraeWork  Kind = "traework"
 	Qoder     Kind = "qoder"
+	QClaw     Kind = "qclaw"
 )
 
 func (k Kind) String() string { return string(k) }

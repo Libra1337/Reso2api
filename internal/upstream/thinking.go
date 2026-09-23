@@ -158,7 +158,7 @@ func injectThinking(obj map[string]any) {
 // 带 max_tokens 一律 500 空响应，剥离后正常）。
 //
 // 实测 WorkBuddy 上游：max_tokens=300 时 thinking 可烧穿全部预算
-//（budget_tokens 上游不保证尊重，10 连发 3 次 think=300 content 空），
+// （budget_tokens 上游不保证尊重，10 连发 3 次 think=300 content 空），
 // 剥掉 max_tokens 后思考自然结束、正文必有。剥离去掉的是客户端的截断上限，
 // 自然停止长度不受影响（测试类请求实际总输出 100-400 token）。
 const minDeepSeekMaxTokens = 1024

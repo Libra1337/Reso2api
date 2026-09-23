@@ -25,6 +25,7 @@ import (
 	"wild-work/internal/pool"
 	"wild-work/internal/prompt"
 	"wild-work/internal/provider"
+	"wild-work/internal/qclaw"
 	"wild-work/internal/qoder"
 	"wild-work/internal/scheduler"
 	"wild-work/internal/server"
@@ -93,7 +94,11 @@ func main() {
 	if err != nil {
 		fatal("读取 Qoder 账号目录失败：%v", err)
 	}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d from %s", len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), cfg.AuthDir)
+	qcAuths, err := auth.LoadQClawDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 QClaw 网关账号目录失败：%v", err)
+	}
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qclaw=%d from %s", len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -102,6 +107,10 @@ func main() {
 	trPool := pool.New(filepath.Join(stateDir, "state-traework.json"))
 	for _, a := range trAuths {
 		trPool.Add(a)
+	}
+	qcPool := pool.New(filepath.Join(stateDir, "state-qclaw.json"))
+	for _, a := range qcAuths {
+		qcPool.Add(a)
 	}
 	qdPool := pool.New(filepath.Join(stateDir, "state-qoder.json"))
 	for _, a := range qdAuths {
@@ -144,6 +153,7 @@ func main() {
 	}
 	trUp := traework.New()
 	trUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	qcUp := qclaw.New()
 	qdUp := qoder.New()
 	qdUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	checkinMinutes, err := config.ParseClockTimes(cfg.Schedule.CheckinTimes)
@@ -166,16 +176,20 @@ func main() {
 	trSch := scheduler.New(scheduler.Config{Pool: trPool, Upstream: trUp, Name: "traework", CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours, TravelDisabled: true, ActivityDisabled: true})
 	// Qoder 无签到活动：调度器只做 token keepalive（每日 refresh 保活）
 	qdSch := scheduler.New(scheduler.Config{Pool: qdPool, Upstream: qdUp, Name: "qoder", KeepaliveHours: cfg.Schedule.KeepaliveHours, SkipCheckin: true, TravelDisabled: true, ActivityDisabled: true})
+	// QClaw 通道依赖桌面端本地 AuthGateway：无签到、无用量上报，只做存在性保活。
+	qcSch := scheduler.New(scheduler.Config{Pool: qcPool, Upstream: qcUp, Name: "qclaw", KeepaliveHours: cfg.Schedule.KeepaliveHours, SkipCheckin: true, TravelDisabled: true, ActivityDisabled: true})
 
 	runtimes := map[provider.Kind]*server.Runtime{
 		provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, StaticModels: server.WorkBuddyStaticModels()},
 		provider.TraeWork:  {Kind: provider.TraeWork, Pool: trPool, Upstream: trUp, StaticModels: server.TraeWorkStaticModels()},
 		provider.Qoder:     {Kind: provider.Qoder, Pool: qdPool, Upstream: qdUp, StaticModels: qoder.StaticModels()},
+		provider.QClaw:     {Kind: provider.QClaw, Pool: qcPool, Upstream: qcUp, StaticModels: qclaw.StaticModels()},
 	}
 	appRuntimes := map[provider.Kind]*app.Runtime{
 		provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, Scheduler: wbSch},
 		provider.TraeWork:  {Kind: provider.TraeWork, Pool: trPool, Upstream: trUp, Scheduler: trSch},
 		provider.Qoder:     {Kind: provider.Qoder, Pool: qdPool, Upstream: qdUp, Scheduler: qdSch},
+		provider.QClaw:     {Kind: provider.QClaw, Pool: qcPool, Upstream: qcUp, Scheduler: qcSch},
 	}
 
 	appInst, err := app.New(app.Options{

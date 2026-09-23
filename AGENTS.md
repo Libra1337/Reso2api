@@ -97,7 +97,7 @@ GET  /api/logs                     # 最近 300 行日志
 POST /api/quit                     # 退出程序
 ```
 
-## 5. 渠道（已实现 WorkBuddy + TraeWork + Qoder）
+## 5. 渠道（已实现 WorkBuddy + TraeWork + Qoder + QClaw）
 
 1. 新建 `internal/<channel>/` 包，实现 `provider.Upstream` 接口
 2. `internal/auth` 增加对应 `Load<Channel>Dir()`（文件名前缀 `<channel>-*.json`）
@@ -106,6 +106,12 @@ POST /api/quit                     # 退出程序
 
 > provider.Kind 即模型名前缀；server 按 `channel/<model>` 前缀路由，无需改接口。
 > Qoder 渠道无签到活动：`DailyCheckin` 返回错误，调度器只做 token keepalive。
+>
+> **QClaw 渠道**（`internal/qclaw`，2026-09-23）：对接 QClaw 桌面端（OpenClaw 内核）的**本地 AuthGateway**——桌面端在 `127.0.0.1:19000` 起 OpenAI 兼容 LLM 代理（`/proxy/llm/chat/completions`、`/proxy/llm/models`），鉴权由网关自注入，无需 API Key。两个硬约束（逆向 0.2.37 实测）：
+> 1. messages 必须含 system 消息，缺失整单 `invalid request`（`PrepareBody` 兜底补入）；
+> 2. 网关拉黑 Go 默认 UA（`Go-http-client/*` → `invalid request`），必须显式设 UA。
+>
+> auth 文件 `auths/qclaw-*.json`（扁平形）：`apiHost` 指定网关地址（默认 `http://127.0.0.1:19000/proxy/llm`）+ uid/nickname；accessToken 占位、expiresAt 自动远期化。通道依赖桌面端进程在线；远程部署时用 SSH 隧道（`ssh -R 19000:127.0.0.1:19000 <server>`）并把 apiHost 指向隧道地址。模型：`qclaw/modelroute`（Auto 路由，支持视觉）与 `qclaw/pool-*` 系列。
 
 ## 6. 关键不变量（改动前必读）
 

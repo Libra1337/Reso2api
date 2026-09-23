@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -388,6 +389,42 @@ func LoadTraeDir(dir string) ([]*Auth, error) {
 			continue
 		}
 		a.Kind, a.FilePath = "traework", f
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// LoadQClawDir 扫描 QClaw 网关凭证（qclaw-*.json）。
+// QClaw 通道鉴权由本地 AuthGateway 自注入，凭证文件只承载网关地址与展示
+// 信息：apiHost（默认 http://127.0.0.1:19000/proxy/llm）+ uid/nickname。
+// accessToken 仅作占位（解析器要求非空）；expiresAt 缺省写入远期时间，
+// 避免每次请求触发刷新。
+func LoadQClawDir(dir string) ([]*Auth, error) {
+	files, err := filepath.Glob(filepath.Join(dir, "qclaw-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	var out []*Auth
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		a, err := Parse(raw)
+		if err != nil {
+			log.Printf("qclaw auth %s: %v", filepath.Base(f), err)
+			continue
+		}
+		if a.AccessToken == "" {
+			a.AccessToken = "local-gateway"
+		}
+		if a.ExpiresAt <= 0 {
+			a.ExpiresAt = 1 << 34
+		}
+		if a.UID == "" {
+			a.UID = "qclaw-" + filepath.Base(f)
+		}
+		a.Kind, a.FilePath = "qclaw", f
 		out = append(out, a)
 	}
 	return out, nil

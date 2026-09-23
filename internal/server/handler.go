@@ -794,7 +794,7 @@ func (h *Handler) runtimeForModel(model string) (*Runtime, string, error) {
 	if active == 1 && fallback != nil {
 		return fallback, model, nil
 	}
-	return nil, "", fmt.Errorf("model %q not found; use explicit prefix: workbuddy/<model> / traework/<model> / qoder/<model>", model)
+	return nil, "", fmt.Errorf("model %q not found; use explicit prefix: workbuddy/<model> / traework/<model> / qoder/<model> / qclaw/<model>", model)
 }
 
 // runtimeForModelWithFallback 先按原样解析；解析出的裸模型名未在渠道模型表
