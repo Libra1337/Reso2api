@@ -351,6 +351,54 @@ func (p *Pool) CooldownSoftForModel(uid string, resetAt time.Time, model, reason
 	p.saveLocked()
 }
 
+// CooledForModelAll 报告全池健康账号是否都处于该模型的冷却期（6004 语义）。
+// dispatchChat 入口快速失败用：全池冷却时立刻回 429，避免 MaxRotate 轮转
+// 空转（每个号一次上游往返，实测一圈 600s+，客户端表现为长时间断连）。
+// 池中无健康账号（普通冷却/禁用）返回 false——那是 no_healthy_account 语义，
+// 交由既有轮转耗尽路径处理。
+func (p *Pool) CooledForModelAll(model string) bool {
+	if model == "" {
+		return false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	healthy := 0
+	for _, e := range p.byUID {
+		if !e.healthy(now) {
+			continue
+		}
+		healthy++
+		if !e.cooledForModel(model, now) {
+			return false
+		}
+	}
+	return healthy > 0
+}
+
+// ModelCoolUntil 返回该模型在健康账号上最早的冷却解除时刻（无冷却返回零值）。
+// 快速失败响应里给客户端提示用。
+func (p *Pool) ModelCoolUntil(model string) time.Time {
+	if model == "" {
+		return time.Time{}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	var earliest time.Time
+	for _, e := range p.byUID {
+		if !e.healthy(now) {
+			continue
+		}
+		if until, ok := e.modelCool[model]; ok && until.After(now) {
+			if earliest.IsZero() || until.Before(earliest) {
+				earliest = until
+			}
+		}
+	}
+	return earliest
+}
+
 // CooledForModel 报告账号当前是否处于指定模型的冷却期（6004 语义）。
 func (p *Pool) CooledForModel(uid, model string) bool {
 	if model == "" {

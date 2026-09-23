@@ -508,6 +508,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if ttw != nil {
 			ttw.Finish()
 		}
+		// 上游中途断流（看门狗掐静默/传输故障）时，客户端只见到半截 SSE——
+		// 大多显示为"断连"。补发标准错误帧让客户端拿到显式失败并可重试，
+		// 而非静默 EOF；仅在上游未发过 finish/[DONE] 时补（正常收尾不重复）。
+		if err != nil && !tee.sawDone() {
+			log.Printf("stream interrupted mid-flight platform=%s uid=%s model=%s err=%v (sending error frame)", rt.Kind, uid, requestedModel, err)
+			errFrame := "data: {\"error\":{\"message\":\"upstream stream interrupted: " + strings.ReplaceAll(err.Error(), "\"", "'") + "\",\"type\":\"api_error\"}}\n\ndata: [DONE]\n\n"
+			_, _ = io.WriteString(out, errFrame)
+			if fl, ok := out.(http.Flusher); ok {
+				fl.Flush()
+			}
+		}
 		h.finishReqLogFile(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, true, fbw.ttfb(), tee.snapshot(), bodyFile)
 		_ = err
 		return
@@ -561,6 +572,18 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 	var lastBody []byte                   // 最后一次上游错误（轮转耗尽时按原状态透传）
 	routeModel := extractModel(body)      // 出站裸模型名（6004 模型级冷却按它画界）
 	convID := extractConversationID(body) // 会话标识：prompt_cache_key 注入源
+	// 全池模型冷却快速失败：所有健康账号都被 6004 冷却时，轮转必然空转
+	// （每号一次上游 429 往返，实测一圈 600s+）。立即以 429 回绝并带最早
+	// 重置时刻，让客户端显式重试而非长时间挂死后断连。
+	if routeModel != "" && rt.Pool.CooledForModelAll(routeModel) {
+		msg := fmt.Sprintf("all accounts rate-limited for model %s; retry later", routeModel)
+		if until := rt.Pool.ModelCoolUntil(routeModel); !until.IsZero() {
+			msg += " (reset " + until.Format(time.RFC3339) + ")"
+		}
+		writeOpenAIError(w, http.StatusTooManyRequests, "model_rate_limited", msg)
+		h.finishReqLog(t0, model, rt.Kind.String(), "", http.StatusTooManyRequests, false, 0, nil, body)
+		return nil, "", false
+	}
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		acct := h.pickWithStickyForModel(rt, routeModel)
 		if acct == nil {

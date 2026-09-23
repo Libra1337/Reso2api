@@ -304,11 +304,13 @@ func num(v any) int64 {
 	return 0
 }
 
-// usageTee 从流经的 chat SSE 字节中提取最后出现的 usage 对象。
+// usageTee 从流经的 chat SSE 字节中提取最后出现的 usage 对象，
+// 并记录是否见过正常收尾（finish_reason 或 [DONE]）——供中断补帧判断。
 type usageTee struct {
-	mu    sync.Mutex
-	buf   []byte
-	usage map[string]any
+	mu      sync.Mutex
+	buf     []byte
+	usage   map[string]any
+	finished bool
 }
 
 func (t *usageTee) Write(p []byte) (int, error) {
@@ -323,15 +325,36 @@ func (t *usageTee) Write(p []byte) (int, error) {
 		line := string(t.buf[:i])
 		t.buf = t.buf[i+1:]
 		if payload, ok := trimDataPrefix(line); ok && payload != "" {
+			if payload == "[DONE]" {
+				t.finished = true
+				continue
+			}
 			var chunk struct {
+				Choices []struct {
+					FinishReason any `json:"finish_reason"`
+				} `json:"choices"`
 				Usage map[string]any `json:"usage"`
 			}
-			if json.Unmarshal([]byte(payload), &chunk) == nil && chunk.Usage != nil {
-				t.usage = chunk.Usage
+			if json.Unmarshal([]byte(payload), &chunk) == nil {
+				if chunk.Usage != nil {
+					t.usage = chunk.Usage
+				}
+				for _, ch := range chunk.Choices {
+					if ch.FinishReason != nil {
+						t.finished = true
+					}
+				}
 			}
 		}
 	}
 	return len(p), nil
+}
+
+// sawDone 上游流是否已正常收尾（finish_reason/[DONE] 均算）。
+func (t *usageTee) sawDone() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.finished
 }
 
 func (t *usageTee) snapshot() map[string]any {

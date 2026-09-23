@@ -369,3 +369,26 @@ func TestModelCoolPersisted(t *testing.T) {
 		t.Fatal("过期模型冷却不应恢复")
 	}
 }
+
+// TestCooledForModelAll 全池冷却判定：一个号未冷却返回 false；全冷却返回 true；
+// 无健康账号返回 false（那是 no_healthy_account 语义）。
+func TestCooledForModelAll(t *testing.T) {
+	p := New(filepath.Join(t.TempDir(), "state.json"))
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "t"})
+	p.Add(&auth.Auth{UID: "u2", AccessToken: "t"})
+	if p.CooledForModelAll("glm-5.3") {
+		t.Fatal("无冷却时应为 false")
+	}
+	p.CooldownSoftForModel("u1", time.Now().Add(time.Hour), "glm-5.3", "6004")
+	if p.CooledForModelAll("glm-5.3") {
+		t.Fatal("u2 未冷却应为 false")
+	}
+	p.CooldownSoftForModel("u2", time.Now().Add(2*time.Hour), "glm-5.3", "6004")
+	if !p.CooledForModelAll("glm-5.3") {
+		t.Fatal("全冷却应为 true")
+	}
+	until := p.ModelCoolUntil("glm-5.3")
+	if until.IsZero() || until.After(time.Now().Add(time.Hour).Add(time.Minute)) {
+		t.Fatalf("最早解除时刻应约 1h 后: %v", until)
+	}
+}
