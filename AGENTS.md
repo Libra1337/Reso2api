@@ -107,7 +107,7 @@ POST /api/quit                     # 退出程序
 > provider.Kind 即模型名前缀；server 按 `channel/<model>` 前缀路由，无需改接口。
 > Qoder 渠道无签到活动：`DailyCheckin` 返回错误，调度器只做 token keepalive。
 >
-> **QClaw 渠道**（`internal/qclaw`，2026-09-23）：对接 QClaw 桌面端（OpenClaw 内核）的**本地 AuthGateway**——桌面端在 `127.0.0.1:19000` 起 OpenAI 兼容 LLM 代理（`/proxy/llm/chat/completions`、`/proxy/llm/models`），鉴权由网关自注入，无需 API Key。两个硬约束（逆向 0.2.37 实测）：
+> **QClaw 渠道**（`internal/qclaw`，2026-09-23）：对接 QClaw 桌面端（OpenClaw 内核）的**本地 AuthGateway**——桌面端在 `127.0.0.1:19000` 起 OpenAI 兼容 LLM 代理（`/proxy/llm/chat/completions`、`/proxy/llm/models`），鉴权由网关自注入，无需 API Key。**多账号形态**：QClaw 无 Linux 版、云端有请求签名（HMAC 绑设备，逆向不可行），采用**多开 macOS 实例**——`scripts/qclaw-multi.sh start <名> <序号>` 启动隔离实例（HOME + user-data-dir 双隔离），网关端口自动递增（19000/19001/19002…，实测三实例并存），每实例登录一个账号，`auths/qclaw-<名>.json` 的 apiHost 指向对应端口，`scripts/qclaw-tunnel.sh 19000 19001 …` 多端口反向隧道到服务器。两个硬约束（逆向 0.2.37 实测）：
 > 1. messages 必须含 system 消息，缺失整单 `invalid request`（`PrepareBody` 兜底补入）；
 > 2. 网关拉黑 Go 默认 UA（`Go-http-client/*` → `invalid request`），必须显式设 UA。
 >
