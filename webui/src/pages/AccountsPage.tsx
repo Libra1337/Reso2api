@@ -233,7 +233,7 @@ function AddAccountDialog({ onDone }: { onDone: () => void }) {
                 已打开授权页面，等待登录完成…
               </div>
               <div className="flex items-center gap-1 rounded-md border border-border bg-muted p-2">
-                <code className="min-w-0 flex-1 truncate px-1 font-mono text-xs">
+                <code className="min-w-0 flex-1 px-1 font-mono text-[11px] leading-relaxed break-all">
                   {stage.authUrl}
                 </code>
               </div>

@@ -47,29 +47,19 @@ type state struct {
 	Err          string `json:"err,omitempty"`
 }
 
-func NewClient() *http.Client { return &http.Client{Timeout: 30 * time.Second} }
-
-// Start 启动本地一次性回调监听，返回 Trae 授权 URL。
-func Start(client *http.Client, statePath string) (string, error) {
-	machineID := randHex(32)                          // 真实客户端 64 位 hex（32 字节）
-	deviceID := randNumericID()                       // 真实客户端 15 位数字设备 ID（首次绑定随机产生）
-	codeVerifier, codeChallenge := traework.GenPKCE() // PKCE：verifier 必须保存，交换 AuthCode 时用
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", err
+// localCallbackHandler 原本地一次性监听的回调处理逻辑（GET/POST 双形态、
+// 写 state、回完成页）。StartWithCallbackBase 模式下由 App 层路由转调
+// HandleCallback 复用同一逻辑。
+func localCallbackHandler(statePath string) (string, http.HandlerFunc) {
+	return "", func(w http.ResponseWriter, r *http.Request) {
+		HandleCallback(statePath)(w, r)
 	}
-	addr := ln.Addr().String()
-	callback := "http://" + addr + "/authorize"
-	st := state{MachineID: machineID, DeviceID: deviceID, CodeVerifier: codeVerifier}
-	if err := writeState(statePath, st); err != nil {
-		_ = ln.Close()
-		return "", err
-	}
+}
 
-	srv := &http.Server{ReadHeaderTimeout: 15 * time.Second}
-	srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 支持 GET（query 参数）与 POST（JSON/form body）两种回调：
-		// 新版授权页登录成功后 redirect=1 走 POST 到 authCallbackURL（body 带 refreshToken）。
+// HandleCallback 返回处理 Trae 授权回调的 handler（App 层挂在
+// /oauth/callback/traework）。POST body 参数并入 query 后与 GET 同路径。
+func HandleCallback(statePath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			if body, _ := io.ReadAll(io.LimitReader(r.Body, 64<<10)); len(body) > 0 {
 				var m map[string]any
@@ -83,6 +73,10 @@ func Start(client *http.Client, statePath string) (string, error) {
 					r.URL.RawQuery = q.Encode()
 				}
 			}
+		}
+		var st state
+		if raw, err := os.ReadFile(statePath); err == nil {
+			_ = json.Unmarshal(raw, &st)
 		}
 		q := r.URL.Query()
 		st.Host = q.Get("host")
@@ -101,19 +95,58 @@ func Start(client *http.Client, statePath string) (string, error) {
 		_ = writeState(statePath, st)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte("<html><body style='font-family:sans-serif;padding:24px'>TraeWork 登录已完成，可以关闭此页面。</body></html>"))
+	}
+}
+
+func NewClient() *http.Client { return &http.Client{Timeout: 30 * time.Second} }
+
+// Start 启动本地一次性回调监听，返回 Trae 授权 URL。
+func Start(client *http.Client, statePath string) (string, error) {
+	callback, handler := localCallbackHandler(statePath)
+	return startWithCallback(client, statePath, callback, handler)
+}
+
+// StartWithCallbackBase 用外部回调基址发起登录（服务器部署形态）。
+// callbackBase 形如 https://gw.example.com，回调地址为
+// {base}/oauth/callback/traework —— 浏览器经公网反代可达网关；daemon 的
+// /oauth/callback/traework 路由把请求转给 HandleCallback。本地一次性
+// 监听不启动（远端浏览器根本到不了容器/服务器的 127.0.0.1 端口，这是
+// 远程部署「登录后无法添加账号」的根因）。
+func StartWithCallbackBase(client *http.Client, statePath, callbackBase string) (string, error) {
+	base := strings.TrimRight(strings.TrimSpace(callbackBase), "/")
+	if base == "" {
+		return Start(client, statePath)
+	}
+	return startWithCallback(client, statePath, base+"/oauth/callback/traework", nil)
+}
+
+// startWithCallback 统一入口：生成本地状态，把 callback 写进授权 URL。
+// handler 非 nil 时启动本地一次性监听（本机部署形态）；nil 表示回调由
+// 外部路由接收（服务器形态，外部调用 HandleCallback）。
+func startWithCallback(client *http.Client, statePath, callback string, handler http.HandlerFunc) (string, error) {
+	machineID := randHex(32)                          // 真实客户端 64 位 hex（32 字节）
+	deviceID := randNumericID()                       // 真实客户端 15 位数字设备 ID（首次绑定随机产生）
+	codeVerifier, codeChallenge := traework.GenPKCE() // PKCE：verifier 必须保存，交换 AuthCode 时用
+	if handler != nil {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return "", err
+		}
+		callback = "http://" + ln.Addr().String() + "/authorize"
+		srv := &http.Server{ReadHeaderTimeout: 15 * time.Second}
+		srv.Handler = handler
+		go func() { _ = srv.Serve(ln) }()
 		go func() {
+			time.Sleep(5 * time.Minute)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			_ = srv.Shutdown(ctx)
 		}()
-	})
-	go func() { _ = srv.Serve(ln) }()
-	go func() {
-		time.Sleep(5 * time.Minute)
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
-	}()
+	}
+	st := state{MachineID: machineID, DeviceID: deviceID, CodeVerifier: codeVerifier}
+	if err := writeState(statePath, st); err != nil {
+		return "", err
+	}
 
 	u, _ := url.Parse(traework.ConsoleHost + "/authorization")
 	v := u.Query()

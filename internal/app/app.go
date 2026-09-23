@@ -289,7 +289,10 @@ func (a *App) Quit() {
 // ---------------------------------------------------------------------------
 
 // StartLoginFor 发起指定渠道登录：workbuddy / traework / qoder。
-func (a *App) StartLoginFor(kind string) (string, error) {
+// callbackBase 非空时（服务器部署，浏览器经公网反代访问面板）TraeWork 回调
+// 改走 {base}/oauth/callback/traework——本地一次性监听在远程浏览器不可达，
+// 登录凭证永远送不回来（登录后无法添加账号的根因）。空则维持本地监听模式。
+func (a *App) StartLoginFor(kind, callbackBase string) (string, error) {
 	k := provider.Kind(strings.TrimSpace(kind))
 	if k == "" {
 		k = provider.WorkBuddy
@@ -320,7 +323,11 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	var err error
 	switch k {
 	case provider.TraeWork:
-		authURL, err = logintrae.Start(a.loginClient, a.loginStateFP)
+		if callbackBase != "" {
+			authURL, err = logintrae.StartWithCallbackBase(a.loginClient, a.loginStateFP, callbackBase)
+		} else {
+			authURL, err = logintrae.Start(a.loginClient, a.loginStateFP)
+		}
 	case provider.Qoder:
 		authURL, err = loginqoder.Start(a.loginClient, a.loginStateFP)
 	default:
@@ -1496,6 +1503,32 @@ func apiError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]any{"error": msg})
 }
 
+// externalBaseURL 判断面板是否被远程访问；是则返回外部可达基址
+// （X-Forwarded-Proto + Host，反代场景），本机访问返回空串。
+func externalBaseURL(r *http.Request) string {
+	host := r.Host
+	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
+		host = h
+	}
+	if host == "" {
+		return ""
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		if h == "127.0.0.1" || h == "localhost" || h == "::1" {
+			return ""
+		}
+	} else if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+		return ""
+	}
+	scheme := "https"
+	if p := r.Header.Get("X-Forwarded-Proto"); p != "" {
+		scheme = p
+	} else if r.TLS == nil && !strings.Contains(host, ":443") {
+		scheme = "http"
+	}
+	return scheme + "://" + host
+}
+
 // HandleAPI 注册管理 API 路由（挂到 server handler 的 /api/* 上）。
 // admin_password 非空时，除 session/login/logout 外全部要求会话 Cookie + CSRF。
 func (a *App) HandleAPI(mux *http.ServeMux) {
@@ -1508,7 +1541,10 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			Channel string `json:"channel"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		url, err := a.StartLoginFor(req.Channel)
+		// 远程访问面板时（Host 非本机回环），回调走网关自身公网路径；
+		// 本机访问维持旧行为（本地一次性监听）。
+		base := externalBaseURL(r)
+		url, err := a.StartLoginFor(req.Channel, base)
 		if err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
@@ -1954,6 +1990,12 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	inner.HandleFunc("POST /api/quit", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		go a.safeGo(func() { a.Quit() })
+	})
+
+	// 开放路由：TraeWork OAuth 回调（浏览器从授权页重定向/POST 到达，
+	// 无会话凭证；一次性 state 文件天然防重放）。
+	mux.HandleFunc("/oauth/callback/traework", func(w http.ResponseWriter, r *http.Request) {
+		logintrae.HandleCallback(a.loginStateFP)(w, r)
 	})
 
 	// 受保护路由挂载：/api/ 前缀整体经会话鉴权（更具体的 session/login/logout 优先匹配）
