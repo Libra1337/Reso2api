@@ -29,6 +29,16 @@ type respInputItem struct {
 	Output    json.RawMessage `json:"output"`
 }
 
+// respContentPart Responses 消息 content 部件（宽松解析，未知类型跳过）。
+// input_image 的 image_url 在 Responses 协议里是字符串，但部分客户端发
+// {url,detail} 对象，故用 any 兼容两种形态。
+type respContentPart struct {
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	ImageURL any    `json:"image_url"`
+	Detail   string `json:"detail"`
+}
+
 // respTool Responses 扁平函数定义 {type:function, name, description, parameters}。
 type respTool struct {
 	Type        string `json:"type"`
@@ -100,9 +110,10 @@ func translateResponsesToChat(raw []byte) ([]byte, string, error) {
 					if role == "" {
 						role = "user"
 					}
+					text, images := responsesContent(it.Content)
 					messages = append(messages, map[string]any{
 						"role":    role,
-						"content": contentToText(it.Content),
+						"content": responsesChatContent(text, images),
 					})
 				case "function_call":
 					call := map[string]any{
@@ -120,11 +131,22 @@ func translateResponsesToChat(raw []byte) ([]byte, string, error) {
 					if len(out) == 0 {
 						out = json.RawMessage(`""`)
 					}
+					text, images := responsesContent(out)
 					messages = append(messages, map[string]any{
 						"role":         "tool",
 						"tool_call_id": it.CallID,
-						"content":      contentToText(out),
+						"content":      text,
 					})
+					// chat 的 role:tool 只承载文本；工具结果里的图片挪到紧随
+					// 其后的合成 user 消息（上游在非 user 轮丢弃图片，见
+					// upstream/images.go 的 relocateAssistantImages）。保序：
+					// 图仍在原工具结果之后，语义不漂移。
+					if len(images) > 0 {
+						messages = append(messages, map[string]any{
+							"role":    "user",
+							"content": responsesChatContent("", images),
+						})
+					}
 				default:
 					// reasoning / item_reference 等忽略
 				}
@@ -181,32 +203,77 @@ func translateResponsesToChat(raw []byte) ([]byte, string, error) {
 	return out, req.Model, nil
 }
 
-// contentToText 兼容字符串与多模态数组，拼接 text part。
-func contentToText(raw json.RawMessage) string {
+// responsesContent 解析 Responses 消息 content（字符串或部件数组），返回
+// 拼接后的文本与其中的图片 part（chat image_url 形状）。
+//
+// 文本拼接规则与旧 contentToText 一致：非空 text 以 \n 连接，纯文本请求的
+// 返回值逐字不变（调用方据此保持出站形状不退化）。
+func responsesContent(raw json.RawMessage) (string, []any) {
 	if len(raw) == 0 {
-		return ""
+		return "", nil
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
+		return s, nil
 	}
-	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+	var parts []respContentPart
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return string(raw), nil
 	}
-	if err := json.Unmarshal(raw, &parts); err == nil {
-		var sb strings.Builder
-		for _, p := range parts {
+	var texts []string
+	var images []any
+	for _, p := range parts {
+		switch p.Type {
+		case "input_image":
+			if img := responsesImagePart(p); img != nil {
+				images = append(images, img)
+			}
+		case "input_text", "output_text", "text":
 			if p.Text != "" {
-				if sb.Len() > 0 {
-					sb.WriteByte('\n')
-				}
-				sb.WriteString(p.Text)
+				texts = append(texts, p.Text)
 			}
 		}
-		return sb.String()
 	}
-	return string(raw)
+	return strings.Join(texts, "\n"), images
+}
+
+// responsesChatContent 文本 + 图片 → chat completions content：
+// 无图返回字符串（形状与纯文本路径一致），有图返回多模态数组
+// （text part 在前，image part 按原始顺序在后）。
+func responsesChatContent(text string, images []any) any {
+	if len(images) == 0 {
+		return text
+	}
+	arr := make([]any, 0, len(images)+1)
+	if text != "" {
+		arr = append(arr, map[string]any{"type": "text", "text": text})
+	}
+	return append(arr, images...)
+}
+
+// responsesImagePart Responses image 部件 → chat image_url part。
+// image_url 兼容字符串与 {url,detail} 对象两种形态；取不到 url 返回 nil
+//（file_id 引用形态在 chat 协议里无对应承载，丢弃）。这里不补 data URL
+// 前缀——出站管线 upstream.normalizeImageURLs 会按 base64 魔数嗅探补全。
+func responsesImagePart(p respContentPart) map[string]any {
+	url, detail := "", p.Detail
+	switch v := p.ImageURL.(type) {
+	case string:
+		url = v
+	case map[string]any:
+		url, _ = v["url"].(string)
+		if detail == "" {
+			detail, _ = v["detail"].(string)
+		}
+	}
+	if url == "" {
+		return nil
+	}
+	iu := map[string]any{"url": url}
+	if detail != "" {
+		iu["detail"] = detail
+	}
+	return map[string]any{"type": "image_url", "image_url": iu}
 }
 
 // translateToolChoice Responses tool_choice → chat tool_choice。
