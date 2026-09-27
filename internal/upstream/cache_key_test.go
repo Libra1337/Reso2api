@@ -52,14 +52,29 @@ func TestInjectPromptCacheKeyStableAndIsolated(t *testing.T) {
 	}
 }
 
-// 客户端已显式带 key → 绝不覆盖；入参 conversationID 在 body 无会话字段时兜底。
+// 客户端显式 key 作会话源：同键同前缀稳定，同键不同 system 必须分开；
+// 入参 conversationID 在 body 无会话字段时兜底。
 func TestInjectPromptCacheKeyPriority(t *testing.T) {
-	explicit := []byte(`{"model":"m","prompt_cache_key":"client-key","messages":[]}`)
-	out := InjectPromptCacheKey(explicit, "u1", "conv")
-	var o map[string]any
-	_ = json.Unmarshal(out, &o)
-	if o["prompt_cache_key"] != "client-key" {
-		t.Fatalf("client key must be preserved, got %v", o["prompt_cache_key"])
+	keyOf := func(body string, uid string) string {
+		var o map[string]any
+		_ = json.Unmarshal(InjectPromptCacheKey([]byte(body), uid, "conv"), &o)
+		k, _ := o["prompt_cache_key"].(string)
+		return k
+	}
+	mainAgent := `{"model":"m","prompt_cache_key":"client-key","messages":[{"role":"system","content":"You are Codex"},{"role":"user","content":"fix bug"}]}`
+	reviewer := `{"model":"m","prompt_cache_key":"client-key","messages":[{"role":"system","content":"You are judging one planned action"},{"role":"user","content":"fix bug"}]}`
+	k1 := keyOf(mainAgent, "u1")
+	if !strings.HasPrefix(k1, "wb2a-u1-") {
+		t.Fatalf("client key must be rewritten with account scope, got %v", k1)
+	}
+	if keyOf(mainAgent, "u1") != k1 {
+		t.Fatal("same client key + same prefix must be stable")
+	}
+	if keyOf(reviewer, "u1") == k1 {
+		t.Fatal("same client key with different system prefix must not share cache key")
+	}
+	if keyOf(mainAgent, "u2") == k1 {
+		t.Fatal("same client key on different accounts must not share cache key")
 	}
 	fallback := InjectPromptCacheKey(chatBodyWithConv(""), "u1", "fallback-conv")
 	var o2 map[string]any

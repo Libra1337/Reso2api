@@ -14,7 +14,7 @@ import (
 // InjectPromptCacheKey 在已改写的出站 body 上注入 prompt_cache_key 字段。
 //
 // 优先级：
-//  1. body 已带 prompt_cache_key → 原值保留（客户端自知复用哪个键）
+//  1. body 已带 prompt_cache_key → 作会话源（并入账号与前缀摘要后重写）
 //  2. body 已带 conversation_id / conversationId → 用它做会话哈希源
 //  3. 都没有 → 用入站 conversationID 参数（来自网关解析的会话标识）
 //  4. 全都没有 → 用请求前缀（首条 system/developer + 首条 user 消息）哈希
@@ -32,8 +32,17 @@ func InjectPromptCacheKey(body []byte, uid, conversationID string) []byte {
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body
 	}
+	// 客户端自带键不能原样透传：Codex 等客户端让主 agent 与审查子 agent
+	// 共用同一会话键，但两者 system 前缀不同——上游按键认会话，前缀不同的
+	// 请求共享一个键就会串入对方内容（09-27 实测同键下出现两种 system）。
+	// 客户端键只作会话源，再并入账号与前缀摘要，保证「同键同前缀」才共享。
 	if existing, ok := obj["prompt_cache_key"].(string); ok && existing != "" {
-		return body
+		obj["prompt_cache_key"] = buildCacheKey(uid, "client:"+existing+"|"+prefixDigest(obj))
+		out, err := json.Marshal(obj)
+		if err != nil {
+			return body
+		}
+		return out
 	}
 	conv := conversationID
 	if v := strField(obj, "conversation_id"); v != "" {
@@ -48,7 +57,10 @@ func InjectPromptCacheKey(body []byte, uid, conversationID string) []byte {
 			conv = v
 		}
 	}
-	if conv == "" {
+	if conv != "" {
+		// 会话标识同样可能被多个子 agent 共用，并入前缀摘要隔离。
+		conv = conv + "|" + prefixDigest(obj)
+	} else {
 		// 无任何会话标识：退化为「请求前缀哈希」——只有前缀真正相同的请求
 		// （同会话的连续轮次、system+首条 user 一致）才共享缓存，语义上
 		// 与上游前缀缓存的命中条件对齐，杜绝跨会话串缓存。
