@@ -94,9 +94,11 @@ func buildCacheKey(uid, conversation string) string {
 	return "wb2a-" + uid8 + "-" + convHex
 }
 
-// prefixDigest 提取请求前缀（首条 system/developer 消息 + 首条 user 消息，
-// 各截 4096 字节）做哈希源。多轮对话中这段前缀稳定不变，与上游前缀缓存的
-// 命中粒度一致；不同应用的 system 提示词不同 → 键必然不同。
+// prefixDigest 以首条 system/developer 消息 + 首条 user 消息的全文做哈希源。
+// 多轮对话中这段前缀稳定不变，与上游前缀缓存的命中粒度一致。
+// 必须全文哈希：ZCode/Claude Code 类客户端的首条 user 前 8KB 是各会话相同的
+// system-reminder（AGENTS.md 等），真正区分会话的提问在其后，截断会让不同
+// 会话撞同一个键、上游串入别的会话内容。
 func prefixDigest(obj map[string]any) string {
 	msgs, ok := obj["messages"].([]any)
 	if !ok || len(msgs) == 0 {
@@ -132,9 +134,6 @@ func prefixDigest(obj map[string]any) string {
 func contentText(v any) string {
 	switch c := v.(type) {
 	case string:
-		if len(c) > 4096 {
-			c = c[:4096]
-		}
 		return c
 	case []any:
 		var b strings.Builder
@@ -147,11 +146,7 @@ func contentText(v any) string {
 				b.WriteString(t)
 			}
 		}
-		s := b.String()
-		if len(s) > 4096 {
-			s = s[:4096]
-		}
-		return s
+		return b.String()
 	}
 	return ""
 }

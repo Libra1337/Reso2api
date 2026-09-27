@@ -102,3 +102,28 @@ func TestChatStreamConvInjectsCacheKey(t *testing.T) {
 		t.Fatalf("outbound body missing prompt_cache_key: %s", captured)
 	}
 }
+
+// 首条 user 前缀相同（共用 8KB system-reminder）但提问不同的两个会话，必须拿到不同键。
+func TestInjectPromptCacheKeySharedLongPrefix(t *testing.T) {
+	reminder := strings.Repeat("<system-reminder>AGENTS.md shared text</system-reminder>\n", 200)
+	mk := func(q string) string {
+		b, _ := json.Marshal(map[string]any{
+			"model": "m",
+			"messages": []any{
+				map[string]any{"role": "system", "content": "You are ZCode"},
+				map[string]any{"role": "user", "content": reminder + q},
+			},
+		})
+		var o map[string]any
+		_ = json.Unmarshal(InjectPromptCacheKey(b, "u1", ""), &o)
+		k, _ := o["prompt_cache_key"].(string)
+		return k
+	}
+	a, b := mk("给账号全部导入服务器"), mk("写一个排序算法")
+	if a == "" || a == b {
+		t.Fatalf("sessions sharing a long prefix must not share a key: %q vs %q", a, b)
+	}
+	if mk("给账号全部导入服务器") != a {
+		t.Fatal("same session must keep a stable key")
+	}
+}
