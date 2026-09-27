@@ -126,3 +126,33 @@ func TestDispatchChatDoesNotReturn6004WhenAnotherAccountWorks(t *testing.T) {
 		t.Fatalf("error envelope: %s", rec.Body.String())
 	}
 }
+
+type contentBlockUpstream struct{ rotateUpstream }
+
+func (u *contentBlockUpstream) ChatStream(*auth.Auth, []byte) (io.ReadCloser, int, []byte, error) {
+	body := `{"code":11140,"msg":"request illegal","displayMsg":{"zh":"内容未通过安全审核"}}`
+	return nil, http.StatusForbidden, []byte(body), nil
+}
+
+// 内容审核拦截必须回 400：monoize 类中转把 403 当渠道永久故障并熔断整条上游。
+func TestContentBlockReturns400(t *testing.T) {
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "t1", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	h := NewHandler(Config{Pool: p, Upstream: &contentBlockUpstream{}, MaxRotate: 5})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"workbuddy/glm-5.3","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+	))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400 body=%s", rec.Code, rec.Body.String())
+	}
+	var e struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil || e.Error.Code != "content_policy_violation" {
+		t.Fatalf("body=%s want content_policy_violation", rec.Body.String())
+	}
+}
