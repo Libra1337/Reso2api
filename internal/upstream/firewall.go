@@ -398,7 +398,7 @@ func IsContentPolicyBlock(body string) bool {
 	return strings.Contains(body, "11140") || strings.Contains(body, "11128")
 }
 
-// FirewallHitResponse 防火墙拦截时返回给客户端的错误体（403）。
+// FirewallHitResponse 防火墙拦截时返回给客户端的错误体（配 400）。
 // 形状对齐 OpenAI 内容违规错误（type=invalid_request_error /
 // code=content_policy_violation）：中转站对该标准形状原样透传 message，
 // 不会改写成"无可用渠道/模型不存在"或账号冷却之类的笼统报错。

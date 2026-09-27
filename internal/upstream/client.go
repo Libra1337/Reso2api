@@ -415,7 +415,7 @@ func (c *Client) ChatStreamConv(a *auth.Auth, body []byte, conversationID string
 						c.recordFirewallHitMeta(a, v.Keyword(), model, excerpt, prepared, false, FirewallHitMeta{
 							Keyword: kw, Verdict: v.Category, Reason: v.Reason, Entry: "chat", Judge: jc.Model,
 						})
-						return nil, http.StatusForbidden, FirewallHitResponse(v.Keyword()), nil
+						return nil, http.StatusBadRequest, FirewallHitResponse(v.Keyword()), nil
 					} else {
 						log.Printf("FIREWALL uid=%s rule=%s judge=%s elapsed=%dms -> marked (forwarded)", a.UID, rule, v.Category, elapsedMS)
 						c.recordFirewallHitMeta(a, rule, model, excerpt, prepared, true, FirewallHitMeta{

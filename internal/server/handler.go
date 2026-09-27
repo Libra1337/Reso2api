@@ -680,9 +680,11 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 				outStatus := status
 				if upstream.IsContentPolicyBlock(string(respBody)) {
 					// 内容审核：回网关防火墙文案，不透传上游 body（账号/业务 code）。
+					// 状态码用 400 不用 403：monoize 类中转把 403 当渠道永久故障，
+					// 一次命中就把整个上游熔断 60s，所有用户随之报 no provider。
 					kw := upstream.ContentBlockKeyword(string(respBody))
 					out = upstream.FirewallHitResponse(kw)
-					outStatus = http.StatusForbidden
+					outStatus = http.StatusBadRequest
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(outStatus)
@@ -734,7 +736,7 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		outStatus := lastStatus
 		if upstream.IsContentPolicyBlock(string(lastBody)) {
 			out = upstream.FirewallHitResponse(upstream.ContentBlockKeyword(string(lastBody)))
-			outStatus = http.StatusForbidden
+			outStatus = http.StatusBadRequest
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(outStatus)
