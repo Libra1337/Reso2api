@@ -4,7 +4,10 @@
 FROM node:22-alpine AS webui
 WORKDIR /webui
 COPY webui/package.json ./
-RUN npm install --no-audit --no-fund
+# npm 无锁文件安装时常漏装平台可选依赖（npm/cli#4828），tailwind v4 的
+# lightningcss 在 alpine 上缺 musl 原生包即构建失败；显式补装。
+RUN npm install --no-audit --no-fund \
+ && npm install --no-audit --no-fund --no-save lightningcss-linux-x64-musl @tailwindcss/oxide-linux-x64-musl
 COPY webui/ ./
 RUN npm run build
 
