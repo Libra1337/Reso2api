@@ -176,16 +176,9 @@ func New() *Client {
 		IdleConnTimeout:     90 * time.Second,
 		ForceAttemptHTTP2:   true,
 	}
-	// 聊天流专用：无总超时（长输出不被掐断），仅约束响应头与空闲连接
-	streamTr := &http.Transport{
-		Proxy:                 ProxyFunc,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   32,
-		IdleConnTimeout:       300 * time.Second,
-		ForceAttemptHTTP2:     true,
-		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 120 * time.Second,
-	}
+	// 聊天流专用：无总超时（长输出不被掐断），仅约束响应头与空闲连接；
+	// 按账号分片到多条独立连接（见 shardedTransport）。
+	streamTr := newShardedTransport(streamShards)
 	return &Client{
 		HTTP:            &http.Client{Timeout: 120 * time.Second, Transport: tr},
 		StreamHTTP:      &http.Client{Transport: streamTr},
