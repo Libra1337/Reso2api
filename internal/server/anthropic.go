@@ -272,7 +272,17 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rc, uid, ok := h.dispatchChat(rt, t0, "anthropic/"+peek.Model, chatBody, w)
+	// 派发期心跳（同 chatCompletions）：提交后错误转 Anthropic error 事件。
+	dw := w
+	var hb *sseHeartbeat
+	if peek.Stream {
+		hb = startSSEHeartbeat(w, anthropicErrFrame)
+		dw = hb
+	}
+	rc, uid, ok := h.dispatchChat(rt, t0, "anthropic/"+peek.Model, chatBody, dw)
+	if hb != nil {
+		w = hb.Stop()
+	}
 	if !ok {
 		// dispatchChat 已按 OpenAI 错误格式写入；Anthropic 客户端也能读出 JSON 错误体
 		return

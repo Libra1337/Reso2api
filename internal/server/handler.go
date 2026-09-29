@@ -537,7 +537,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rc, uid, ok := h.dispatchChat(rt, t0, requestedModel, body, w)
+	// 派发期心跳：长上下文冷缓存/上游拥塞时选号+等响应头可达数分钟，
+	// 期间零字节会被下游读超时掐断（nginx 499 → 用户侧 502）。
+	dw := w
+	var hb *sseHeartbeat
+	if peek.Stream {
+		hb = startSSEHeartbeat(w, openAIErrFrame)
+		dw = hb
+	}
+	rc, uid, ok := h.dispatchChat(rt, t0, requestedModel, body, dw)
+	if hb != nil {
+		w = hb.Stop()
+	}
 	if !ok {
 		return
 	}

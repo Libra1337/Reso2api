@@ -622,7 +622,17 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		writeResponsesError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rc, uid, ok := h.dispatchChat(rt, t0, model, chatBody, w)
+	// 派发期心跳（同 chatCompletions）：提交后错误转 Responses error 事件。
+	dw := w
+	var hb *sseHeartbeat
+	if wantStream.Stream {
+		hb = startSSEHeartbeat(w, responsesErrFrame)
+		dw = hb
+	}
+	rc, uid, ok := h.dispatchChat(rt, t0, model, chatBody, dw)
+	if hb != nil {
+		w = hb.Stop()
+	}
 	if !ok {
 		return // dispatchChat 已写错误响应
 	}
