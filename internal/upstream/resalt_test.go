@@ -12,8 +12,9 @@ import (
 
 // resaltCacheKey：有 prompt_cache_key → 换盐且其余字段不动；两次结果互不相同。
 func TestResaltCacheKey(t *testing.T) {
+	c := &Client{}
 	body := []byte(`{"model":"m","prompt_cache_key":"wb2a-u1-abcd1234","messages":[{"role":"user","content":"hi"}]}`)
-	f1 := resaltCacheKey(body)
+	f1 := c.resaltCacheKey(body)
 	if f1 == nil {
 		t.Fatal("resalt must succeed with prompt_cache_key present")
 	}
@@ -28,7 +29,7 @@ func TestResaltCacheKey(t *testing.T) {
 	if o1["model"] != "m" || o1["messages"] == nil {
 		t.Fatal("other fields must be untouched")
 	}
-	f2 := resaltCacheKey(body)
+	f2 := c.resaltCacheKey(body)
 	var o2 map[string]any
 	_ = json.Unmarshal(f2, &o2)
 	k2, _ := o2["prompt_cache_key"].(string)
@@ -39,11 +40,42 @@ func TestResaltCacheKey(t *testing.T) {
 
 // 无 prompt_cache_key → nil（调用方放弃重试）。
 func TestResaltCacheKeyNoKey(t *testing.T) {
-	if got := resaltCacheKey([]byte(`{"model":"m","messages":[]}`)); got != nil {
+	c := &Client{}
+	if got := c.resaltCacheKey([]byte(`{"model":"m","messages":[]}`)); got != nil {
 		t.Fatalf("want nil, got %s", got)
 	}
-	if got := resaltCacheKey(nil); got != nil {
+	if got := c.resaltCacheKey(nil); got != nil {
 		t.Fatal("nil body must give nil")
+	}
+}
+
+// 盐粘性：同一基础键再次 resalt 换新盐（二次分叉升级）；已带盐的 body 再
+// resalt 时盐叠加在剥掉旧盐后的基础键上，不产生嵌套盐。
+func TestResaltCacheKeyStickyAndStrip(t *testing.T) {
+	c := &Client{}
+	body := []byte(`{"model":"m","prompt_cache_key":"wb2a-u1-abcd1234","messages":[{"role":"user","content":"hi"}]}`)
+	var k1 string
+	_ = json.Unmarshal(c.resaltCacheKey(body), &map[string]any{})
+	var o1 map[string]any
+	_ = json.Unmarshal(c.resaltCacheKey(body), &o1)
+	k1, _ = o1["prompt_cache_key"].(string)
+	if !strings.HasPrefix(k1, "wb2a-u1-abcd1234-r") {
+		t.Fatalf("salted key malformed: %q", k1)
+	}
+	// 已带盐的 body 再 resalt：剥离旧盐再叠加新盐，仍以基础键为前缀
+	salted := []byte(`{"model":"m","prompt_cache_key":"` + k1 + `","messages":[]}`)
+	var o2 map[string]any
+	_ = json.Unmarshal(c.resaltCacheKey(salted), &o2)
+	k2, _ := o2["prompt_cache_key"].(string)
+	if !strings.HasPrefix(k2, "wb2a-u1-abcd1234-r") || strings.Contains(k2[:len(k2)-14], "-r") {
+		t.Fatalf("nested salt must be stripped: %q", k2)
+	}
+	// 粘性表里基础键有记录，applySessionSalt 能复用
+	fresh := []byte(`{"model":"m","prompt_cache_key":"wb2a-u1-abcd1234","messages":[]}`)
+	var o3 map[string]any
+	_ = json.Unmarshal(c.applySessionSalt(fresh), &o3)
+	if k3, _ := o3["prompt_cache_key"].(string); k3 == "wb2a-u1-abcd1234" {
+		t.Fatalf("applySessionSalt must apply recorded salt, got base")
 	}
 }
 

@@ -2,9 +2,14 @@ package upstream
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+
+	"wild-work/internal/auth"
 )
 
 func repairBody(t *testing.T, msgs string) []byte {
@@ -142,5 +147,110 @@ func TestAggregateEmitsSingleReasoningField(t *testing.T) {
 	}
 	if _, has := msg["reasoning"]; has {
 		t.Fatal("aggregate must not emit bare reasoning field")
+	}
+}
+
+// Test11148StickySalt 分叉会话的盐必须粘住：首轮撞 11148 换盐重试成功后，
+// 后续轮次应直接带同一盐出站（不再撞 11148、不再换随机盐冷启动）。
+// 生产形态：压缩重写历史中部、首条 system+user 保留 → 缓存键稳定，但上游
+// 会话内容分叉 → 11148。上游语义模拟：key 当会话标识，会话记录的历史必须
+// 是新请求历史的前缀，否则按「start a new conversation」拒收。
+func Test11148StickySalt(t *testing.T) {
+	var mu sync.Mutex
+	var keys []string
+	sessions := map[string][]string{} // cache key -> 已缓存的消息序列
+
+	messagesOf := func(body []byte) []string {
+		var obj struct {
+			Messages []map[string]any `json:"messages"`
+		}
+		_ = json.Unmarshal(body, &obj)
+		out := make([]string, 0, len(obj.Messages))
+		for _, m := range obj.Messages {
+			b, _ := json.Marshal(m)
+			out = append(out, string(b))
+		}
+		return out
+	}
+
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		var obj struct {
+			Key string `json:"prompt_cache_key"`
+		}
+		_ = json.Unmarshal(body, &obj)
+		msgs := messagesOf(body)
+		mu.Lock()
+		keys = append(keys, obj.Key)
+		stored, seen := sessions[obj.Key]
+		diverged := false
+		if seen {
+			if len(msgs) < len(stored) {
+				diverged = true
+			} else {
+				for i := range stored {
+					if stored[i] != msgs[i] {
+						diverged = true
+						break
+					}
+				}
+			}
+		}
+		if !diverged {
+			sessions[obj.Key] = msgs
+		}
+		mu.Unlock()
+		if diverged {
+			return jsonResp(400, `{"code":11148,"msg":"tool calls and tool results do not match"}`), nil
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+		}, nil
+	})
+	a := &auth.Auth{AccessToken: "at", UID: "u1"}
+
+	conv := func(history ...string) []byte {
+		msgs := make([]map[string]string, 0, len(history))
+		msgs = append(msgs, map[string]string{"role": "system", "content": "固定系统提示"})
+		msgs = append(msgs, map[string]string{"role": "user", "content": "首个问题"})
+		for _, h := range history {
+			msgs = append(msgs, map[string]string{"role": "assistant", "content": h})
+		}
+		b, _ := json.Marshal(map[string]any{
+			"model":           "glm-5.2",
+			"conversation_id": "conv-sticky-salt",
+			"messages":        msgs,
+		})
+		return b
+	}
+
+	// 轮1：新会话直接成功
+	if _, st, _, err := c.ChatStream(a, conv("回答一")); err != nil || st != 200 {
+		t.Fatalf("turn1: status=%d err=%v", st, err)
+	}
+	// 轮2：压缩重写历史中部（首条 system/user 保留 → 键稳定）→ 11148 → 加盐重试成功
+	if _, st, _, err := c.ChatStream(a, conv("压缩摘要：之前讨论了 X")); err != nil || st != 200 {
+		t.Fatalf("turn2: status=%d err=%v", st, err)
+	}
+	// 轮3：在轮2 基础上续问 → 应直接带同一盐出站，不再撞 11148
+	if _, st, _, err := c.ChatStream(a, conv("压缩摘要：之前讨论了 X", "回答二")); err != nil || st != 200 {
+		t.Fatalf("turn3: status=%d err=%v", st, err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(keys) != 4 {
+		t.Fatalf("upstream calls=%d (keys=%v), want 4", len(keys), keys)
+	}
+	if keys[0] != keys[1] {
+		t.Fatalf("base key should be stable: %v", keys)
+	}
+	if keys[2] != keys[3] {
+		t.Fatalf("salted key must be sticky after first resalt: %v", keys)
+	}
+	if keys[2] == keys[0] || !strings.HasPrefix(keys[2], keys[0]) {
+		t.Fatalf("salted key must extend base: %v", keys)
 	}
 }

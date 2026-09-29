@@ -112,6 +112,14 @@ type Client struct {
 	judgeMu         sync.RWMutex
 	Judge           JudgeConfig
 
+	// sessionSalts 11148 分叉会话的粘性盐（基础缓存键 → 盐后缀）。上游把
+	// prompt_cache_key 当会话标识，客户端压缩/重写历史后与上游缓存会话分叉
+	// 必 11148；换盐即换上游会话。盐必须粘住：否则该会话每轮先撞一次 11148
+	// 再换随机盐冷启动——分叉会话永久零缓存（实测 fd727884 会话连续 6 轮）。
+	// 出站前预注入（applySessionSalt），后续轮次直接跳过 11148 往返。
+	saltMu       sync.Mutex
+	sessionSalts map[string]string
+
 	fwMu   sync.Mutex      // 防火墙命中事件锁
 	fwHits []FirewallEvent // 环形（最新在后，cap 500，内存态）
 
@@ -188,7 +196,58 @@ func New() *Client {
 		WebBaseCN:       "https://www.workbuddy.cn",
 		ChatBaseGlobal:  "https://www.workbuddy.ai",
 		BillingBaseGlob: "https://www.workbuddy.ai",
+		sessionSalts:    make(map[string]string),
 	}
+}
+
+// applySessionSalt 出站前应用该会话已有的粘性盐：11148 分叉会话后续轮次
+// 直接使用新上游会话的键，跳过「先撞 11148 再换盐」的整轮往返与冷启动。
+// 未分叉会话无记录，键原样保留，零开销。
+func (c *Client) applySessionSalt(prepared []byte) []byte {
+	if len(prepared) == 0 || len(c.sessionSalts) == 0 {
+		return prepared
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(prepared, &obj); err != nil {
+		return prepared
+	}
+	key, _ := obj["prompt_cache_key"].(string)
+	if key == "" {
+		return prepared
+	}
+	base := stripSaltSuffix(key)
+	c.saltMu.Lock()
+	salt, ok := c.sessionSalts[base]
+	c.saltMu.Unlock()
+	if !ok || base+"-r"+salt == key {
+		return prepared
+	}
+	obj["prompt_cache_key"] = base + "-r" + salt
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return prepared
+	}
+	return out
+}
+
+// saltSuffixLen 盐后缀固定形态 "-r"+12 hex，长度 14。
+const saltSuffixLen = 14
+
+// stripSaltSuffix 剥离键尾的盐后缀（无盐原样返回）。
+func stripSaltSuffix(key string) string {
+	if len(key) <= saltSuffixLen {
+		return key
+	}
+	suf := key[len(key)-saltSuffixLen:]
+	if suf[0] != '-' || suf[1] != 'r' {
+		return key
+	}
+	for _, ch := range suf[2:] {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+			return key
+		}
+	}
+	return key[:len(key)-saltSuffixLen]
 }
 
 // streamClient 返回聊天流使用的 HTTP 客户端（无总超时，防止长输出被掐断）。
@@ -377,8 +436,9 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 // 注入（body 自带 conversation_id 时以 body 为准），同账号同会话命中上游前缀缓存。
 func (c *Client) ChatStreamConv(a *auth.Auth, body []byte, conversationID string) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	prepared, degraded := c.applyPrompt(PrepareBodyOptWithEfforts(body, c.SanitizeFingerprints, c.effortsSnapshot()))
-	// prompt_cache_key（费用优化，上游实测 ~17×）：按账号隔离的稳定缓存键。
-	prepared = InjectPromptCacheKey(prepared, a.UID, conversationID)
+	// prompt_cache_key（费用优化，上游实测 ~17×）：按账号隔离的稳定缓存键；
+	// 分叉会话若有粘性盐（11148 修复，见 toolrepair.go）在此预注入。
+	prepared = c.applySessionSalt(InjectPromptCacheKey(prepared, a.UID, conversationID))
 	// 内容防火墙：高危内容不出网关（上游拉黑是整号永久的，代价不可逆）。
 	if c.ContentFirewall {
 		if rule, excerpt, action := FirewallCheck(prepared); action != "" {
@@ -454,7 +514,7 @@ func (c *Client) ChatStreamConv(a *auth.Auth, body []byte, conversationID string
 			log.Printf("chat_stream uid=%s: broken tool sequence (11148) -> repaired retry", a.UID)
 			return c.chatOnce(a, fixed)
 		}
-		if fresh := resaltCacheKey(prepared); fresh != nil {
+		if fresh := c.resaltCacheKey(prepared); fresh != nil {
 			log.Printf("chat_stream uid=%s: 11148 with intact pairing -> fresh conversation retry", a.UID)
 			return c.chatOnce(a, fresh)
 		}
