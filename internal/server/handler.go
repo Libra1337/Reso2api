@@ -181,7 +181,7 @@ func (h *Handler) stickyKey(kind provider.Kind, session string) string {
 // 48h 数据：639 次换号，698 个零缓存大请求中 647 个由换号导致。
 // 会话级粘性把换号的影响面收窄到单个会话，且每个会话保底 50 次热缓存请求。
 func (h *Handler) pickWithSticky(rt *Runtime) *auth.Auth {
-	return h.pickWithStickyForModel(rt, "", "")
+	return h.pickWithStickyForModel(rt, "", "", nil)
 }
 
 func (h *Handler) pickWithStickyForModel(rt *Runtime, model, session string, body []byte) *auth.Auth {
