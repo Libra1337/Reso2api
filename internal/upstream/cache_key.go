@@ -94,6 +94,44 @@ func buildCacheKey(uid, conversation string) string {
 	return "wb2a-" + uid8 + "-" + convHex
 }
 
+// ConversationFingerprint 返回请求的稳定会话指纹，供会话级粘性路由使用。
+// 优先级与 InjectPromptCacheKey 的会话源完全一致：
+//  1. 客户端 prompt_cache_key（哈希收口，防超长键撑爆内存）
+//  2. conversation_id / conversationId / metadata 嵌套形态
+//  3. 请求前缀摘要（首条 system + 首条 user 全文哈希）
+//  4. 全都没有 → 空串（调用方退化为渠道级粘性）
+//
+// 同一会话的连续请求指纹稳定；不同会话几乎必然不同——粘性路由按它分组，
+// 换号只影响单个会话的缓存键，不再牵连其他会话。
+func ConversationFingerprint(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return ""
+	}
+	if existing, ok := obj["prompt_cache_key"].(string); ok && existing != "" {
+		sum := sha256.Sum256([]byte(existing))
+		return "pk:" + hex.EncodeToString(sum[:16])
+	}
+	if v := strField(obj, "conversation_id"); v != "" {
+		return "conv:" + v
+	}
+	if v := strField(obj, "conversationId"); v != "" {
+		return "conv:" + v
+	}
+	if md, ok := obj["metadata"].(map[string]any); ok {
+		if v := strField(md, "conversation_id"); v != "" {
+			return "conv:" + v
+		}
+		if v := strField(md, "conversationId"); v != "" {
+			return "conv:" + v
+		}
+	}
+	return prefixDigest(obj)
+}
+
 // prefixDigest 以首条 system/developer 消息 + 首条 user 消息的全文做哈希源。
 // 多轮对话中这段前缀稳定不变，与上游前缀缓存的命中粒度一致。
 // 必须全文哈希：ZCode/Claude Code 类客户端的首条 user 前 8KB 是各会话相同的

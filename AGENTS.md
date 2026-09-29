@@ -125,7 +125,7 @@ POST /api/quit                     # 退出程序
 8. 上游 HTTP ≥400 错误直接透传原始响应，不包装
 9. 定价缓存持久化到 `data/pricing-cache.json`，启动加载，超 1h 自动刷新
 10. 无桌面 Linux 必须 `--no-tray`，不带参数 panic 直接 exit 提示
-11. **粘性路由**：`pickWithSticky` 优先复用上次账号，直至连续成功请求达 50 次或遭遇错误冷却。成功时 `stickySuccess` 递增计数，错误时 `stickyClear` 清除粘性记录。不使用 credits 阈值（pool 中余额是 stale 数据）。
+11. **粘性路由（会话级）**：`pickWithStickyForModel` 按【渠道+会话指纹】（`upstream.ConversationFingerprint`，与缓存键会话源同优先级）粘住账号，直至该会话连续成功 50 次或账号故障（冷却/禁用/6004）。**只有账号侧错误清粘性**（6004/欠费/会话死/5xx/传输失败/卡流）；11140/11133 等请求内容错误不清——账号健康，续用同号保缓存。会话级化的原因：prompt_cache_key 含 uid，换号=换键=上游前缀缓存全冷；渠道全局粘性时 48h 换号 639 次、698 个零缓存大请求中 647 个由换号导致（2026-09-29 实测）。粘性表 4096 条上限 + 2h 空闲淘汰。不使用 credits 阈值（pool 中余额是 stale 数据）。
 
 ## 7. 平台能力差异表（internal/platform）
 

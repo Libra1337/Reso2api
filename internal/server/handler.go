@@ -69,7 +69,14 @@ type stickyEntry struct {
 	uid      string
 	reqCount int
 	maxReqs  int
+	lastUsed time.Time
 }
+
+// 会话级粘性的淘汰参数：空闲超时 + 条目上限（插入新条目时顺带清扫）。
+const (
+	stickyIdleTTL     = 2 * time.Hour
+	stickyMaxEntries  = 4096
+)
 
 // Handler 主路由。
 type Handler struct {
@@ -78,7 +85,7 @@ type Handler struct {
 
 	apiMu    sync.RWMutex // 保护 cfg.APIKey（面板可运行时修改）
 	stickyMu sync.RWMutex
-	sticky   map[string]*stickyEntry // runtimeKind → stickyEntry
+	sticky   map[string]*stickyEntry // stickyKey(kind, 会话指纹) → stickyEntry
 	reqLogs  reqLogStore             // 请求级日志（环形）
 }
 
@@ -151,25 +158,38 @@ func (h *Handler) Close() { h.reqLogs.close() }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.ServeHTTP(w, r) }
 
-// stickyKey 粘性路由 key（按渠道独立）
-func (h *Handler) stickyKey(kind provider.Kind) string { return kind.String() }
+// stickyKey 粘性路由 key：按渠道 + 会话指纹分组。
+// session 为空（请求无任何会话标识）时退化为渠道级全局键——旧行为。
+func (h *Handler) stickyKey(kind provider.Kind, session string) string {
+	if session == "" {
+		return kind.String()
+	}
+	return kind.String() + "|" + session
+}
 
-// pickWithSticky 粘性路由选择账号。
+// pickWithSticky 粘性路由选择账号（无会话标识的兼容入口）。
 // 优先使用上次成功路由的账号，直到：
 //   - 账号进入冷却/禁用状态
 //   - 该模型处于 6004 限额冷却
 //   - 连续成功请求达到 maxReqs 次（默认 50），自动轮换
 //
 // 任一条件触发则降级为按模型选号并重置粘性记录。
+//
+// 按【会话】而非渠道全局粘（2026-09-29）：prompt_cache_key 内含账号 UID，
+// 换号即换键，上游前缀缓存全冷。此前渠道全局计数每 50 个请求换一次号
+// （高峰期中位 188s 一次），一次换号把所有活跃会话的缓存一起清零——
+// 48h 数据：639 次换号，698 个零缓存大请求中 647 个由换号导致。
+// 会话级粘性把换号的影响面收窄到单个会话，且每个会话保底 50 次热缓存请求。
 func (h *Handler) pickWithSticky(rt *Runtime) *auth.Auth {
-	return h.pickWithStickyForModel(rt, "")
+	return h.pickWithStickyForModel(rt, "", "")
 }
 
-func (h *Handler) pickWithStickyForModel(rt *Runtime, model string) *auth.Auth {
+func (h *Handler) pickWithStickyForModel(rt *Runtime, model, session string) *auth.Auth {
 	const defaultMaxReqs = 50
 
+	key := h.stickyKey(rt.Kind, session)
 	h.stickyMu.RLock()
-	sticky := h.sticky[h.stickyKey(rt.Kind)]
+	sticky := h.sticky[key]
 	h.stickyMu.RUnlock()
 
 	if sticky != nil && sticky.uid != "" && sticky.reqCount < sticky.maxReqs {
@@ -177,6 +197,9 @@ func (h *Handler) pickWithStickyForModel(rt *Runtime, model string) *auth.Auth {
 		if acct != nil {
 			status, ok := rt.Pool.Status(sticky.uid)
 			if ok && !status.Cooling && !status.Disabled && !rt.Pool.CooledForModel(sticky.uid, model) {
+				h.stickyMu.Lock()
+				sticky.lastUsed = time.Now()
+				h.stickyMu.Unlock()
 				log.Printf("sticky route platform=%s uid=%s model=%s count=%d/%d",
 					rt.Kind, sticky.uid, model, sticky.reqCount, sticky.maxReqs)
 				return acct
@@ -190,27 +213,57 @@ func (h *Handler) pickWithStickyForModel(rt *Runtime, model string) *auth.Auth {
 	}
 
 	h.stickyMu.Lock()
-	h.sticky[h.stickyKey(rt.Kind)] = &stickyEntry{uid: acct.UID, maxReqs: defaultMaxReqs}
+	h.evictStickyLocked()
+	h.sticky[key] = &stickyEntry{uid: acct.UID, maxReqs: defaultMaxReqs, lastUsed: time.Now()}
 	h.stickyMu.Unlock()
 	log.Printf("new sticky route platform=%s uid=%s model=%s maxReqs=%d", rt.Kind, acct.UID, model, defaultMaxReqs)
 	return acct
 }
 
+// evictStickyLocked 清扫粘性记录（调用方持锁）：先删空闲超时条目，
+// 仍超上限则按 lastUsed 淘汰最旧。插入新条目时调用，摊销 O(n)。
+func (h *Handler) evictStickyLocked() {
+	if len(h.sticky) < stickyMaxEntries/2 {
+		return
+	}
+	now := time.Now()
+	for k, e := range h.sticky {
+		if now.Sub(e.lastUsed) > stickyIdleTTL {
+			delete(h.sticky, k)
+		}
+	}
+	if len(h.sticky) < stickyMaxEntries {
+		return
+	}
+	type kv struct {
+		k string
+		t time.Time
+	}
+	all := make([]kv, 0, len(h.sticky))
+	for k, e := range h.sticky {
+		all = append(all, kv{k, e.lastUsed})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].t.Before(all[j].t) })
+	for _, e := range all[:len(all)-stickyMaxEntries+1] {
+		delete(h.sticky, e.k)
+	}
+}
+
 // stickySuccess 粘性路由成功：递增请求计数。
-func (h *Handler) stickySuccess(rt *Runtime) {
+func (h *Handler) stickySuccess(rt *Runtime, session string) {
 	h.stickyMu.Lock()
 	defer h.stickyMu.Unlock()
-	key := h.stickyKey(rt.Kind)
-	if e := h.sticky[key]; e != nil {
+	if e := h.sticky[h.stickyKey(rt.Kind, session)]; e != nil {
 		e.reqCount++
 	}
 }
 
-// stickyClear 粘性路由失败（错误/冷却）：清除粘性记录，下次请求强制重新选号。
-func (h *Handler) stickyClear(rt *Runtime) {
+// stickyClear 粘性路由失败（错误/冷却）：清除该会话的粘性记录，下次请求强制重新选号。
+// 只影响传入会话；其他会话的粘性与缓存不受牵连。
+func (h *Handler) stickyClear(rt *Runtime, session string) {
 	h.stickyMu.Lock()
 	defer h.stickyMu.Unlock()
-	delete(h.sticky, h.stickyKey(rt.Kind))
+	delete(h.sticky, h.stickyKey(rt.Kind, session))
 }
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -572,6 +625,8 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 	var lastBody []byte                   // 最后一次上游错误（轮转耗尽时按原状态透传）
 	routeModel := extractModel(body)      // 出站裸模型名（6004 模型级冷却按它画界）
 	convID := extractConversationID(body) // 会话标识：prompt_cache_key 注入源
+	// 会话指纹：粘性路由按它分组（与缓存键会话源同优先级），换号只冷一个会话。
+	session := upstream.ConversationFingerprint(body)
 	// 全池模型冷却快速失败：所有健康账号都被 6004 冷却时，轮转必然空转
 	// （每号一次上游 429 往返，实测一圈 600s+）。立即以 429 回绝并带最早
 	// 重置时刻，让客户端显式重试而非长时间挂死后断连。
@@ -585,12 +640,12 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		return nil, "", false
 	}
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		acct := h.pickWithStickyForModel(rt, routeModel)
+		acct := h.pickWithStickyForModel(rt, routeModel, session)
 		if acct == nil {
 			break
 		}
 		if tried[acct.UID] || rt.Pool.CooledForModel(acct.UID, routeModel) {
-			h.stickyClear(rt)
+			h.stickyClear(rt, session)
 			acct = rt.Pool.PickExcludingForModel(tried, routeModel)
 			if acct == nil {
 				break
@@ -602,7 +657,7 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 			if err := rt.Upstream.RefreshToken(acct); err != nil {
 				log.Printf("refresh failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
 				lastErr = err
-				h.stickyClear(rt)
+				h.stickyClear(rt, session)
 				var ue *provider.Error
 				if errors.As(err, &ue) && ue.Kind == provider.ErrSessionDead {
 					// 连续 N 次才禁用：单次 12153 多为抖动误报（上游实测误杀率 100%）
@@ -624,12 +679,11 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		rc, status, respBody, terr := provider.ChatStreamConv(rt.Upstream, acct, body, convID)
 		if terr != nil {
 			lastErr = terr
-			h.stickyClear(rt)
+			h.stickyClear(rt, session)
 			rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 			continue
 		}
 		if status >= 400 {
-			h.stickyClear(rt)
 			kind := rt.Upstream.Classify(status, string(respBody))
 			// 11102「该后端无此模型」：确定性答复，非账号故障——按 (账号, 模型)
 			// 写指数退避负缓存（6h 起 ×2 封顶 24h），同请求立刻换号。
@@ -638,6 +692,7 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 				rt.Pool.BlockModelBackoff(acct.UID, routeModel, "11102 model absent")
 				log.Printf("model absent rotate platform=%s uid=%s model=%s (11102)",
 					rt.Kind, acct.UID, routeModel)
+				h.stickyClear(rt, session)
 				lastErr = &provider.Error{Kind: kind, Status: status, Msg: string(respBody)}
 				lastStatus, lastBody = status, respBody
 				continue
@@ -647,6 +702,7 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 			// 中转站模型探活——若罚号，单个客户端即可把整池打入冷却雪崩。
 			switch kind {
 			case provider.ErrHardCredit:
+				h.stickyClear(rt, session)
 				rt.Pool.Cooldown(acct.UID, pool.CoolHard, h.cfg.HardCooldown, "余额/权益不足")
 			case provider.ErrSoftRate:
 				// 6004 模型级限流：只对该模型冷却，账号对其他模型立即可用。
@@ -659,17 +715,23 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 					rt.Pool.CooldownSoftForModel(acct.UID, resetAt, routeModel, "6004 model rate limit")
 					log.Printf("model rate limit rotate platform=%s uid=%s model=%s reset=%s",
 						rt.Kind, acct.UID, routeModel, resetAt.Format(time.RFC3339))
+					h.stickyClear(rt, session)
 					lastErr = &provider.Error{Kind: kind, Status: status, Msg: string(respBody)}
 					continue
 				}
+				h.stickyClear(rt, session)
 				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "429 rate limit")
 			case provider.ErrSessionDead:
+				h.stickyClear(rt, session)
 				if rt.Pool.NoteSessionDead(acct.UID) {
 					log.Printf("session dead disable platform=%s uid=%s consecutive=%d", rt.Kind, acct.UID, pool.SessionDeadThreshold())
 				}
 			case provider.ErrServer:
+				h.stickyClear(rt, session)
 				rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 			default: // ErrClient / ErrNotFound：请求本身被上游拒绝
+				// 不清粘性：11140 内容审核 / 11133 参数错是请求内容问题，
+				// 账号本身健康，会话下一轮继续用同号可保住上游前缀缓存。
 				// 11140 内容审核熔断：短窗多次说明持续发违规内容，停号止损防整号拉黑
 				if status == http.StatusForbidden && strings.Contains(string(respBody), "11140") {
 					if rt.Pool.NoteContentBlock(acct.UID) {
@@ -709,7 +771,7 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		case perr := <-progress:
 			if perr != nil && perr != io.EOF {
 				lastErr = perr
-				h.stickyClear(rt)
+				h.stickyClear(rt, session)
 				rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 				_ = rc.Close()
 				continue
@@ -717,7 +779,7 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		case <-time.After(firstContentTimeout):
 			log.Printf("chat stall detected platform=%s uid=%s model? first content > %v, rotate", rt.Kind, acct.UID, firstContentTimeout)
 			lastErr = fmt.Errorf("first content chunk timeout > %v", firstContentTimeout)
-			h.stickyClear(rt)
+			h.stickyClear(rt, session)
 			rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 			_ = rc.Close()
 			continue
@@ -728,7 +790,7 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		if routeModel != "" {
 			rt.Pool.BlockModelClear(acct.UID, routeModel)
 		}
-		h.stickySuccess(rt)
+		h.stickySuccess(rt, session)
 		return brc, acct.UID, true
 	}
 	if lastBody != nil {
