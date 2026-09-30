@@ -8,7 +8,9 @@
 //
 // 行为：
 //   - 每个文件用 meta 表（key=imported:<file>）记录导入行数，重跑跳过已导过的文件；
-//   - request_logs.jsonl 的 time 无年份（"01-02 15:04:05"），按当前年解析，非法行跳过并计数；
+//   - request_logs.jsonl 的 time 无年份（"01-02 15:04:05"），按 -tz（默认
+//     Asia/Shanghai，即网关写入时的容器时区）解析后补当前年——导入容器自身
+//     时区无关紧要，勿用 time.Local（踩过坑：UTC 容器把历史平移了 +8h）；
 //   - 批量 INSERT（每批 1000 行），26 万行实测秒级完成；
 //   - 导入不影响 jsonl 原文件（保留为冷备；切换后网关不再追加）。
 package main
@@ -64,7 +66,17 @@ func main() {
 	dsn := flag.String("dsn", "", "PostgreSQL DSN（必填）")
 	reqlogPath := flag.String("reqlog", "", "request_logs.jsonl 路径（空=跳过）")
 	firewallPath := flag.String("firewall", "", "firewall_events.jsonl 路径（空=跳过）")
+	tzName := flag.String("tz", "Asia/Shanghai", "jsonl wall-clock 时间所在时区")
 	flag.Parse()
+	loc, err := time.LoadLocation(*tzName)
+	if err != nil {
+		// 无 zonedata 环境（alpine 裸容器）兜底：Asia/Shanghai 恒 +08 无夏令时
+		if *tzName == "Asia/Shanghai" {
+			loc = time.FixedZone("CST", 8*3600)
+		} else {
+			log.Fatalf("加载时区 %s 失败: %v", *tzName, err)
+		}
+	}
 	if *dsn == "" {
 		log.Fatal("必须提供 -dsn")
 	}
@@ -78,7 +90,7 @@ func main() {
 	defer store.Close()
 
 	if *reqlogPath != "" {
-		importReqLog(ctx, store, *reqlogPath)
+		importReqLog(ctx, store, *reqlogPath, loc)
 	}
 	if *firewallPath != "" {
 		importFirewall(ctx, store, *firewallPath)
@@ -93,7 +105,7 @@ func alreadyImported(ctx context.Context, store *pgstore.Store, path string) (st
 	return v, ok
 }
 
-func importReqLog(ctx context.Context, store *pgstore.Store, path string) {
+func importReqLog(ctx context.Context, store *pgstore.Store, path string, loc *time.Location) {
 	if v, ok := alreadyImported(ctx, store, path); ok {
 		log.Printf("已导入过 %s（%s 行），跳过；强制重导请先清 meta 表该键", path, v)
 		return
@@ -104,7 +116,7 @@ func importReqLog(ctx context.Context, store *pgstore.Store, path string) {
 	}
 	defer f.Close()
 
-	year := time.Now().Year()
+	year := time.Now().In(loc).Year()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 4<<20)
 	var batch []pgstore.ReqLogRow
@@ -128,7 +140,7 @@ func importReqLog(ctx context.Context, store *pgstore.Store, path string) {
 			bad++
 			continue
 		}
-		t, err := time.ParseInLocation("01-02 15:04:05", l.Time, time.Local)
+		t, err := time.ParseInLocation("01-02 15:04:05", l.Time, loc)
 		if err != nil {
 			bad++
 			continue
