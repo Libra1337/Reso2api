@@ -148,6 +148,17 @@ type Config struct {
 		File string `json:"file,omitempty"`
 	} `json:"prompt"`
 
+	Storage struct {
+		// Mode 日志存储模式：file（默认，jsonl 追加，零依赖）/ postgres
+		// （请求日志 + 防火墙事件落 PostgreSQL，面板分页走 SQL，可服务端过滤）。
+		Mode string `json:"mode,omitempty"` // file / postgres
+		// PostgresDSN postgres 模式连接串；mode=postgres 时必填。
+		// 例：postgres://wildwork:pass@127.0.0.1:5432/wildwork?sslmode=disable
+		PostgresDSN string `json:"postgres_dsn,omitempty"`
+		// PGRetentionDays 请求日志保留天数；0 = 永久（与 file 模式语义一致）。
+		PGRetentionDays int `json:"pg_retention_days,omitempty"`
+	} `json:"storage"`
+
 	// 解析后
 	HardCreditDur  time.Duration `json:"-"`
 	SoftRateDur    time.Duration `json:"-"`
@@ -175,6 +186,7 @@ func Default() *Config {
 	fwOn := true
 	c.Features.ContentFirewall = &fwOn
 	c.Prompt.Mode = "passthrough"
+	c.Storage.Mode = "file"
 	return c
 }
 
@@ -324,6 +336,13 @@ func applyEnv(c *Config) {
 			c.Upstream.TimeoutSeconds = n
 		}
 	}
+	// PostgreSQL 存储模式（compose 注入 DSN 最方便；覆盖 config 里的值）
+	if v := os.Getenv("WILDWORK_PG_DSN"); v != "" {
+		c.Storage.PostgresDSN = v
+		if c.Storage.Mode == "" {
+			c.Storage.Mode = "postgres"
+		}
+	}
 }
 
 func (c *Config) normalize() error {
@@ -366,6 +385,16 @@ func (c *Config) normalize() error {
 	mins, err := ParseClockTimes(c.Schedule.CheckinTimes)
 	if err != nil {
 		return fmt.Errorf("schedule.checkin_times: %w", err)
+	}
+	switch c.Storage.Mode {
+	case "", "file":
+		c.Storage.Mode = "file"
+	case "postgres":
+		if c.Storage.PostgresDSN == "" {
+			return fmt.Errorf("storage.mode=postgres 需要 storage.postgres_dsn（或 env WILDWORK_PG_DSN）")
+		}
+	default:
+		return fmt.Errorf("storage.mode must be file or postgres, got %q", c.Storage.Mode)
 	}
 	c.Schedule.CheckinTimes = FormatClockTimes(mins)
 	if len(c.Schedule.CheckinHours) == 0 {

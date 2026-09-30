@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/pgstore"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
 	"wild-work/internal/upstream"
@@ -55,6 +56,9 @@ type Config struct {
 	RequestLogPath string
 	// RequestLogLegacyPath 旧版单 JSON 日志路径；存在且新日志为空时一次性导入
 	RequestLogLegacyPath string
+	// PGStore PostgreSQL 存储模式（storage.mode=postgres）；非 nil 时请求日志
+	// 走 PG（jsonl 停写，历史由 cmd/reqlog-import 一次性导入）
+	PGStore *pgstore.Store
 	HardCooldown         time.Duration
 	SoftCooldown         time.Duration
 	ErrThreshold         int
@@ -116,6 +120,9 @@ func NewHandler(cfg Config) *Handler {
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry)}
 	h.reqLogs.path = cfg.RequestLogPath
 	h.reqLogs.legacy = cfg.RequestLogLegacyPath
+	if cfg.PGStore != nil {
+		h.reqLogs.pg = cfg.PGStore
+	}
 	h.reqLogs.load()
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
@@ -144,6 +151,14 @@ func NewHandler(cfg Config) *Handler {
 func (h *Handler) RequestLogsPage(page, size int) ([]ReqLog, int) {
 	return h.reqLogs.Page(page, size)
 }
+
+// RequestLogsPageFilter 按页 + 过滤读取请求日志（PG 模式服务端过滤；file 模式忽略过滤）。
+func (h *Handler) RequestLogsPageFilter(page, size int, f pgstore.ReqLogFilter) ([]ReqLog, int) {
+	return h.reqLogs.PageFilter(page, size, f)
+}
+
+// PGStorage 是否处于 PostgreSQL 存储模式。
+func (h *Handler) PGStorage() bool { return h.reqLogs.pg != nil }
 
 // ReadBodyArchive 读回请求体存档。
 func (h *Handler) ReadBodyArchive(name string) ([]byte, bool) {

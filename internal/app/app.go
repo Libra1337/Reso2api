@@ -33,6 +33,7 @@ import (
 	"wild-work/internal/provider"
 	"wild-work/internal/qoder"
 	"wild-work/internal/scheduler"
+	"wild-work/internal/pgstore"
 	"wild-work/internal/server"
 	"wild-work/internal/upstream"
 )
@@ -1759,10 +1760,27 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		events, total := a.FirewallPage(page, size)
 		writeJSON(w, http.StatusOK, map[string]any{"events": events, "total": total, "page": page, "size": size})
 	})
-	// 请求日志历史分页（永久 jsonl，newest-first）。
+	// 请求日志历史分页（jsonl / PG，newest-first）。
+	// PG 模式支持服务端过滤（file 模式忽略过滤参数，行为不变）：
+	//   model / uid（精确）、status_class=ok|err、since/until（unix 秒）。
 	inner.HandleFunc("GET /api/request_logs/page", func(w http.ResponseWriter, r *http.Request) {
 		page, size := pageParams(r)
-		logs, total := a.handler.RequestLogsPage(page, size)
+		var logs []server.ReqLog
+		var total int
+		if a.handler.PGStorage() {
+			q := r.URL.Query()
+			since, _ := strconv.ParseInt(q.Get("since"), 10, 64)
+			until, _ := strconv.ParseInt(q.Get("until"), 10, 64)
+			logs, total = a.handler.RequestLogsPageFilter(page, size, pgstore.ReqLogFilter{
+				Model:       q.Get("model"),
+				UID:         q.Get("uid"),
+				StatusClass: q.Get("status_class"),
+				Since:       since,
+				Until:       until,
+			})
+		} else {
+			logs, total = a.handler.RequestLogsPage(page, size)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"logs": logs, "total": total, "page": page, "size": size})
 	})
 	// 请求体存档回看（详情弹窗：完整请求内容）。

@@ -44,5 +44,10 @@
   "prompt": {
     "mode": "passthrough",
     "file": ""
+  },
+  "storage": {
+    "mode": "file",
+    "postgres_dsn": "",
+    "pg_retention_days": 0
   }
 }

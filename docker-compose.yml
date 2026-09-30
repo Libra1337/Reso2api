@@ -17,3 +17,23 @@ services:
       # 单文件 bind 会让 config.json.tmp → rename 报 device or resource busy。
       # 仍挂这一份给启动读取；面板保存会改写 data/config.json 并尽力回写这里。
       - ./config.json:/app/config.json
+
+  # PostgreSQL 存储模式（storage.mode=postgres）。
+  # 默认不启动：docker compose --profile postgres up -d
+  # 启用后把 data/config.json 的 storage.postgres_dsn 指到
+  #   postgres://wildwork:wildwork@postgres:5432/wildwork?sslmode=disable
+  # 历史数据先跑一次 cmd/reqlog-import（见 README「PostgreSQL 存储模式」）。
+  postgres:
+    image: postgres:16-alpine
+    container_name: wild-work-postgres
+    restart: unless-stopped
+    profiles: ["postgres"]
+    environment:
+      - POSTGRES_USER=wildwork
+      - POSTGRES_PASSWORD=wildwork
+      - POSTGRES_DB=wildwork
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./data/pg:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"

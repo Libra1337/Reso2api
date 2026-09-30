@@ -175,3 +175,36 @@ docs/              # 上游逆向笔记
 ## License
 
 [MIT](LICENSE)
+
+## PostgreSQL 存储模式（可选）
+
+默认与以前完全一致：请求日志与防火墙事件写 `data/*.jsonl`（零依赖）。需要 SQL 级查询时可切到 PostgreSQL：
+
+```bash
+# 1. 启动 PG（默认 profile 不启动，显式 --profile postgres）
+docker compose --profile postgres up -d postgres
+
+# 2. 一次性导入历史 jsonl（防重跑，可安全重复执行）
+docker run --rm --network wild-work_default -v "$PWD:/app" -w /app golang:1.25 \
+  go run ./cmd/reqlog-import \
+  -dsn "postgres://wildwork:wildwork@postgres:5432/wildwork?sslmode=disable" \
+  -reqlog /app/data/request_logs.jsonl \
+  -firewall /app/data/firewall_events.jsonl
+
+# 3. data/config.json 增加 storage 段并重启
+#    "storage": { "mode": "postgres",
+#                 "postgres_dsn": "postgres://wildwork:wildwork@postgres:5432/wildwork?sslmode=disable",
+#                 "pg_retention_days": 0 }
+docker compose up -d
+```
+
+切换后：jsonl 停写（保留为冷备）；面板分页走 SQL（真实总数）；`/api/request_logs/page` 支持可选过滤参数 `model`、`uid`、`status_class=ok|err`、`since`、`until`（unix 秒）。直接 psql 排查：
+
+```sql
+SELECT date_trunc('hour', t) h, count(*),
+       sum(cached_tokens)::float / greatest(sum(in_tokens),1) AS cache_rate
+FROM request_logs WHERE t > now() - interval '1 day'
+GROUP BY 1 ORDER BY 1 DESC;
+```
+
+回滚：`storage.mode` 改回 `file` 重启即恢复 jsonl 追加（PG 里的数据仍在）。`pg_retention_days>0` 时每日自动清理过期行。请求体存档（10% 采样）两种模式都走文件。

@@ -5,15 +5,19 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"wild-work/internal/pgstore"
 )
 
 func readFileTail(path string, max int64) ([]byte, error) {
@@ -60,7 +64,22 @@ type ReqLog struct {
 	// BodyFile 请求体存档文件名（data/reqlog_bodies/<file>；空 = 未存档）。
 	// 网关按 10% 采样存档（详见 handler logging），供面板回看完整请求内容。
 	BodyFile string `json:"body_file,omitempty"`
+	// At 请求真实开始时刻（PG 模式写库用；jsonl/面板继续用 Time 展示串）。
+	At time.Time `json:"-"`
 }
+
+// reqLogPG PostgreSQL 后端最小接口（pgstore.Store 实现；测试用假实现）。
+type reqLogPG interface {
+	InsertReqLogs(ctx context.Context, rows []pgstore.ReqLogRow) error
+	QueryReqLogs(ctx context.Context, f pgstore.ReqLogFilter) ([]pgstore.ReqLogRow, int, error)
+}
+
+// PG 模式异步批量写入参数。
+const (
+	pgQueueCap      = 4096
+	pgFlushRows     = 100
+	pgFlushInterval = 500 * time.Millisecond
+)
 
 // reqLogMemCap 面板内存窗口大小；完整历史在 jsonl 追加日志里永久保留。
 const reqLogMemCap = 1000
@@ -68,14 +87,39 @@ const reqLogMemCap = 1000
 type reqLogStore struct {
 	mu      sync.Mutex
 	logs    []ReqLog // 内存窗口（旧→新追加，读取时倒序返回）
-	path    string   // jsonl 追加日志路径（每请求一行，永不删除）
+	path    string   // jsonl 追加日志路径（每请求一行，永不删除；PG 模式不追加）
 	legacy  string   // 旧版单 JSON 文件路径（存在则一次性导入）
 	journal *os.File
 	bodies  string // 请求体存档目录（10% 采样，面板详情回看）
+
+	// PG 模式（storage.mode=postgres）：journal 停写，行进队列由后台批量落库；
+	// 内存窗口照常维护（/api/usage/stats token 聚合与 5s 轮询依赖）。
+	pg      reqLogPG
+	pgQueue chan pgstore.ReqLogRow
+	pgDone  chan struct{}
+	pgDrops int64 // 队列满丢弃计数（仅计数告警，不阻塞请求路径）
+	pgErrAt time.Time
 }
 
 // load 启动时恢复：优先读 jsonl 日志尾窗；日志为空且存在旧版 JSON 时一次性导入。
+// PG 模式：内存窗口改从 PG 恢复最近一页，jsonl 停读停写（历史已由导入工具入库）。
 func (s *reqLogStore) load() {
+	if s.pg != nil {
+		s.pgQueue = make(chan pgstore.ReqLogRow, pgQueueCap)
+		s.pgDone = make(chan struct{})
+		go s.pgWriterLoop()
+		if rows, _, err := s.pg.QueryReqLogs(context.Background(), pgstore.ReqLogFilter{Limit: reqLogMemCap}); err == nil {
+			for i := len(rows) - 1; i >= 0; i-- { // 旧→新
+				s.logs = append(s.logs, reqLogRowToLog(rows[i]))
+			}
+		} else {
+			log.Printf("reqlog: pg seed memory window failed: %v", err)
+		}
+		if s.bodies != "" {
+			_ = os.MkdirAll(s.bodies, 0o700)
+		}
+		return
+	}
 	if s.path == "" {
 		return
 	}
@@ -132,6 +176,30 @@ func (s *reqLogStore) trimMemLocked() {
 }
 
 func (s *reqLogStore) add(l ReqLog) {
+	if s.pg != nil {
+		at := l.At
+		if at.IsZero() {
+			at = time.Now()
+		}
+		select {
+		case s.pgQueue <- pgstore.ReqLogRow{
+			T: at, Model: l.Model, Channel: l.Channel, UID: l.UID, Status: l.Status,
+			Stream: l.Stream, TTFBMS: l.TTFBMS, TotalMS: l.TotalMS, InTokens: l.InTokens,
+			OutTokens: l.OutTokens, CachedTokens: l.CachedTokens, Credit: l.Credit, BodyFile: l.BodyFile,
+		}:
+		default:
+			s.pgDrops++
+			if time.Since(s.pgErrAt) > time.Minute {
+				s.pgErrAt = time.Now()
+				log.Printf("reqlog: pg queue full, dropped=%d rows total", s.pgDrops)
+			}
+		}
+		s.mu.Lock()
+		s.logs = append(s.logs, l)
+		s.trimMemLocked()
+		s.mu.Unlock()
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.journal != nil {
@@ -141,6 +209,53 @@ func (s *reqLogStore) add(l ReqLog) {
 	}
 	s.logs = append(s.logs, l)
 	s.trimMemLocked()
+}
+
+// pgWriterLoop 后台批量落库：满 pgFlushRows 行或 pgFlushInterval 到期即 flush。
+// insert 失败按分钟限频记日志，行丢弃（日志非请求关键路径，不反压网关）。
+func (s *reqLogStore) pgWriterLoop() {
+	defer close(s.pgDone)
+	batch := make([]pgstore.ReqLogRow, 0, pgFlushRows)
+	ticker := time.NewTicker(pgFlushInterval)
+	defer ticker.Stop()
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := s.pg.InsertReqLogs(ctx, batch)
+		cancel()
+		if err != nil && time.Since(s.pgErrAt) > time.Minute {
+			s.pgErrAt = time.Now()
+			log.Printf("reqlog: pg insert failed (dropped %d rows): %v", len(batch), err)
+		}
+		batch = batch[:0]
+	}
+	for {
+		select {
+		case r, ok := <-s.pgQueue:
+			if !ok {
+				flush()
+				return
+			}
+			batch = append(batch, r)
+			if len(batch) >= pgFlushRows {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+// reqLogRowToLog PG 行 → 展示结构（Time 还原为面板用的本地时间串）。
+func reqLogRowToLog(r pgstore.ReqLogRow) ReqLog {
+	return ReqLog{
+		Time: r.T.Local().Format("01-02 15:04:05"), Model: r.Model, Channel: r.Channel,
+		UID: r.UID, Status: r.Status, Stream: r.Stream, TTFBMS: r.TTFBMS, TotalMS: r.TotalMS,
+		InTokens: r.InTokens, OutTokens: r.OutTokens, CachedTokens: r.CachedTokens,
+		Credit: r.Credit, BodyFile: r.BodyFile, At: r.T,
+	}
 }
 
 // SetBodiesDir 设置请求体存档目录（main 启动时调用）。
@@ -204,9 +319,28 @@ func (s *reqLogStore) ReadBodyArchive(name string) ([]byte, bool) {
 	return raw, true
 }
 
+// PageFilter 分页读取（PG 模式）：服务端过滤 + 真实总数。
+func (s *reqLogStore) PageFilter(page, size int, f pgstore.ReqLogFilter) ([]ReqLog, int) {
+	f.Limit = size
+	f.Offset = page * size
+	rows, total, err := s.pg.QueryReqLogs(context.Background(), f)
+	if err != nil {
+		log.Printf("reqlog: pg query failed: %v", err)
+		return nil, 0
+	}
+	out := make([]ReqLog, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, reqLogRowToLog(r))
+	}
+	return out, total
+}
+
 // Page 按页读取 jsonl 永久日志（newest-first 页序；page=0 最新一页）。
 // 与内存窗口无关——完整历史都在磁盘上，翻多旧都能翻到。
 func (s *reqLogStore) Page(page, size int) ([]ReqLog, int) {
+	if s.pg != nil {
+		return s.PageFilter(page, size, pgstore.ReqLogFilter{})
+	}
 	if size <= 0 || size > 1000 {
 		size = 100
 	}
@@ -246,6 +380,11 @@ func (s *reqLogStore) Page(page, size int) ([]ReqLog, int) {
 
 // close 关闭日志句柄（进程退出/测试清理用）。
 func (s *reqLogStore) close() {
+	if s.pg != nil && s.pgQueue != nil {
+		close(s.pgQueue)
+		<-s.pgDone // 等 flush 完成，尽量不丢尾部行
+		s.pgQueue = nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.journal != nil {
@@ -280,6 +419,7 @@ func (h *Handler) finishReqLogFile(t0 time.Time, model, channel, uid string, sta
 		Stream:  stream,
 		TTFBMS:  ttfb.Milliseconds(),
 		TotalMS: time.Since(t0).Milliseconds(),
+		At:      t0,
 	}
 	l.BodyFile = bodyFile
 	if usage != nil {

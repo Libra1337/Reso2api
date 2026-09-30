@@ -126,6 +126,7 @@ POST /api/quit                     # 退出程序
 9. 定价缓存持久化到 `data/pricing-cache.json`，启动加载，超 1h 自动刷新
 10. 无桌面 Linux 必须 `--no-tray`，不带参数 panic 直接 exit 提示
 11. **粘性路由（会话级）**：`pickWithStickyForModel` 按【渠道+会话指纹】（`upstream.ConversationFingerprint`，与缓存键会话源同优先级）粘住账号，直至该会话连续成功 50 次或账号故障（冷却/禁用/6004）。**只有账号侧错误清粘性**（6004/欠费/会话死/5xx/传输失败/卡流）；11140/11133 等请求内容错误不清——账号健康，续用同号保缓存。会话级化的原因：prompt_cache_key 含 uid，换号=换键=上游前缀缓存全冷；渠道全局粘性时 48h 换号 639 次、698 个零缓存大请求中 647 个由换号导致（2026-09-29 实测）。粘性表 4096 条上限 + 2h 空闲淘汰。不使用 credits 阈值（pool 中余额是 stale 数据）。
+12. **存储双模式**：`storage.mode` = file（默认，jsonl 追加零依赖）/ postgres（请求日志+防火墙事件落 PG，jsonl 停写不改不删）。PG 模式：内存环两种模式都保留；面板 `/api/request_logs/page` 响应形状不变但 total 为真实总数，新增可选过滤参数（model/uid/status_class/since/until，file 模式忽略）；请求体存档永远走文件（body_file 是文件名，不入库）；历史用 `cmd/reqlog-import` 一次性导入，meta 表防重跑；切回 file 即恢复 jsonl 追加（回滚安全）
 
 ## 7. 平台能力差异表（internal/platform）
 

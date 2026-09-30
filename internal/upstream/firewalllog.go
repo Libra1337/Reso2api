@@ -1,15 +1,20 @@
-// firewalllog.go 防火墙命中事件永久落盘（jsonl 追加）。
+// firewalllog.go 防火墙命中事件永久落盘（jsonl 追加；PG 模式改落 PostgreSQL）。
 // 面板翻页只读文件尾，统计走增量计数；启动时若文件过大则压缩保留尾部。
+// PG 模式：写入/翻页/统计走 pgstore（jsonl 停写，历史由 cmd/reqlog-import 导入）。
 package upstream
 
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"wild-work/internal/pgstore"
 )
 
 const (
@@ -27,9 +32,31 @@ type firewallLogStore struct {
 	today   int
 	todayY  string
 	rules   map[string]int64
+
+	// PG 模式（SetFirewallPG 后生效）：写入同步落库（事件量小，1s 超时），
+	// 翻页/统计走 SQL；内存 ring（Client.fwHits）两种模式都保留。
+	pg    *pgstore.Store
+	errAt time.Time
 }
 
 var fwLog firewallLogStore
+
+// SetFirewallPG 切换防火墙事件到 PostgreSQL 存储（main 启动时调用；
+// 必须在 SetFirewallLogPath 之后，PG 模式下 jsonl 停写）。
+func SetFirewallPG(s *pgstore.Store) {
+	fwLog.mu.Lock()
+	defer fwLog.mu.Unlock()
+	fwLog.pg = s
+	if s != nil {
+		fwLog.journal = nil // jsonl 停写
+		if t, td, rules, err := s.FirewallStats(context.Background(), time.Local); err == nil {
+			fwLog.total, fwLog.today, fwLog.rules = t, td, rules
+			fwLog.todayY = time.Now().Format("2006-01-02")
+		} else {
+			log.Printf("firewall log: pg stats seed failed: %v", err)
+		}
+	}
+}
 
 // SetFirewallLogPath 初始化防火墙事件持久化文件（main 启动时调用）。
 func SetFirewallLogPath(path string) {
@@ -111,8 +138,42 @@ func truncateRunes(s string, n int) string {
 
 func appendFirewallLog(e FirewallEvent) {
 	fwLog.mu.Lock()
-	defer fwLog.mu.Unlock()
+	pg := fwLog.pg
+	fwLog.mu.Unlock()
 	e.Content = truncateRunes(e.Content, firewallContentMaxRunes)
+	if pg != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		err := pg.InsertFirewallEvents(ctx, []pgstore.FirewallEventRow{{
+			At: e.At, Rule: e.Rule, UID: e.UID, Nick: e.Nick, Model: e.Model,
+			Snippet: e.Snippet, Content: e.Content, Match: e.Match, Observe: e.Observe,
+			Keyword: e.Keyword, Verdict: e.Verdict, Reason: e.Reason, Entry: e.Entry, Judge: e.Judge,
+		}})
+		cancel()
+		if err != nil && time.Since(fwLog.errAt) > time.Minute {
+			fwLog.errAt = time.Now()
+			log.Printf("firewall log: pg insert failed: %v", err)
+		}
+		// 内存 ring 照常（appendFirewallRing 调用方 recordFirewallHitMeta 已处理）；
+		// 增量计数同步维护，免得 PG 抖动时面板统计空白。
+		fwLog.mu.Lock()
+		if fwLog.rules == nil {
+			fwLog.rules = map[string]int64{}
+		}
+		day := time.Now().Format("2006-01-02")
+		if fwLog.todayY != day {
+			fwLog.todayY = day
+			fwLog.today = 0
+		}
+		fwLog.total++
+		fwLog.today++
+		if e.Rule != "" {
+			fwLog.rules[e.Rule]++
+		}
+		fwLog.mu.Unlock()
+		return
+	}
+	fwLog.mu.Lock()
+	defer fwLog.mu.Unlock()
 	if fwLog.journal != nil {
 		if raw, err := json.Marshal(e); err == nil {
 			_, _ = fwLog.journal.Write(append(raw, '\n'))
@@ -160,6 +221,25 @@ func (c *Client) FirewallEventsPaged(page, size int) ([]FirewallEvent, int) {
 	}
 	if page < 0 {
 		page = 0
+	}
+	fwLog.mu.Lock()
+	pg := fwLog.pg
+	fwLog.mu.Unlock()
+	if pg != nil {
+		rows, total, err := pg.QueryFirewallEvents(context.Background(), size, page*size)
+		if err != nil {
+			log.Printf("firewall log: pg query failed: %v", err)
+			return nil, 0
+		}
+		out := make([]FirewallEvent, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, FirewallEvent{
+				At: r.At, Rule: r.Rule, UID: r.UID, Nick: r.Nick, Model: r.Model,
+				Snippet: r.Snippet, Content: r.Content, Match: r.Match, Observe: r.Observe,
+				Keyword: r.Keyword, Verdict: r.Verdict, Reason: r.Reason, Entry: r.Entry, Judge: r.Judge,
+			})
+		}
+		return out, total
 	}
 	fwLog.mu.Lock()
 	path := fwLog.path

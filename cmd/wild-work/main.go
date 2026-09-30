@@ -21,6 +21,7 @@ import (
 	"wild-work/internal/app"
 	"wild-work/internal/auth"
 	"wild-work/internal/config"
+	"wild-work/internal/pgstore"
 	"wild-work/internal/platform"
 	"wild-work/internal/pool"
 	"wild-work/internal/prompt"
@@ -220,6 +221,36 @@ func main() {
 	if err != nil {
 		fatal("embed web: %v", err)
 	}
+	// PostgreSQL 存储模式（storage.mode=postgres）：请求日志 + 防火墙事件落库。
+	// 连不上直接退出——配置错误应显式失败，静默丢日志更糟。
+	var pgDB *pgstore.Store
+	if cfg.Storage.Mode == "postgres" {
+		pgCtx, pgCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		pgDB, err = pgstore.Open(pgCtx, cfg.Storage.PostgresDSN)
+		pgCancel()
+		if err != nil {
+			fatal("PostgreSQL 存储模式连接失败：%v", err)
+		}
+		defer pgDB.Close()
+		log.Printf("storage mode: postgres (request logs + firewall events)")
+		if cfg.Storage.PGRetentionDays > 0 {
+			go func() {
+				run := func() {
+					ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+					defer cancel()
+					if n, err := pgDB.EnforceRetention(ctx, cfg.Storage.PGRetentionDays); err != nil {
+						log.Printf("pg retention: %v", err)
+					} else if n > 0 {
+						log.Printf("pg retention: deleted %d rows older than %dd", n, cfg.Storage.PGRetentionDays)
+					}
+				}
+				run() // 启动即清一次
+				for range time.Tick(24 * time.Hour) {
+					run()
+				}
+			}()
+		}
+	}
 	h := server.NewHandler(server.Config{
 		Runtimes:             runtimes,
 		RequestLogPath:       filepath.Join(stateDir, "request_logs.jsonl"),
@@ -231,12 +262,16 @@ func main() {
 		ErrCooldown:          cfg.ErrCooldownDur,
 		WebUI:                sub,
 		AttachAPI:            appInst.HandleAPI,
+		PGStore:              pgDB,
 	})
 	appInst.SetHandler(h)
-	defer h.Close() // 关闭请求日志 journal 文件句柄
+	defer h.Close() // 关闭请求日志 journal 句柄 / PG 写入队列 flush
 	// 请求体存档目录（10% 采样，永久保留，面板详情弹窗回看）+ 防火墙事件永久日志
 	h.SetBodyArchiveDir(filepath.Join(stateDir, "reqlog_bodies"))
 	upstream.SetFirewallLogPath(filepath.Join(stateDir, "firewall_events.jsonl"))
+	if pgDB != nil {
+		upstream.SetFirewallPG(pgDB)
+	}
 
 	// 启动即对齐账号池：清掉 state 里已无凭证文件的幽灵条目
 	// （否则幽灵顶着旧 credits 参与 Pick，刷新必败并反复烧轮转名额）。
