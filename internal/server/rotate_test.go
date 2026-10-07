@@ -82,7 +82,7 @@ func TestDispatchChatRotatesOnModelRateLimit(t *testing.T) {
 	body := []byte(`{"model":"glm-5.3","messages":[{"role":"user","content":"hi"}]}`)
 	h.sticky[h.stickyKey(rt.Kind, upstream.ConversationFingerprint(body))] = &stickyEntry{uid: "u1", maxReqs: 50, lastUsed: time.Now()}
 	rec := httptest.NewRecorder()
-	rc, uid, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", body, rec, "")
+	rc, uid, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", body, rec, upstream.ConversationFingerprint(body))
 	if !ok {
 		t.Fatalf("dispatch failed status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -180,7 +180,7 @@ func TestStickyIsPerConversation(t *testing.T) {
 	// A 的粘性账号 u1 被 6004 限流 → A 换到别的号
 	up.limit["u1"] = true
 	rec := httptest.NewRecorder()
-	rc, uidA, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", convA, rec, "")
+	rc, uidA, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", convA, rec, upstream.ConversationFingerprint(convA))
 	if !ok {
 		t.Fatalf("convA failed status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -191,7 +191,7 @@ func TestStickyIsPerConversation(t *testing.T) {
 
 	// B 的粘性必须不受影响：仍走 u2
 	rec = httptest.NewRecorder()
-	rc, uidB, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", convB, rec, "")
+	rc, uidB, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", convB, rec, upstream.ConversationFingerprint(convB))
 	if !ok {
 		t.Fatalf("convB failed status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -214,7 +214,7 @@ func TestContentBlockKeepsSticky(t *testing.T) {
 	h.sticky[key] = &stickyEntry{uid: "u1", maxReqs: 50, lastUsed: time.Now()}
 
 	rec := httptest.NewRecorder()
-	if _, _, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", conv, rec, ""); ok {
+	if _, _, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", conv, rec, upstream.ConversationFingerprint(conv)); ok {
 		t.Fatal("content block should fail dispatch")
 	}
 	if rec.Code != http.StatusBadRequest {

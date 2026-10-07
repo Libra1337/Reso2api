@@ -135,6 +135,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.MaskUpstream != nil {
 		maskUpstream = *cfg.MaskUpstream
 	}
+	maskUpstreamDefault = maskUpstream
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), maskUpstream: maskUpstream, sessLastIn: make(map[string]int64)}
 	if cfg.Keepalive.Enabled {
 		h.ka = newKeepaliveStore(cfg.KeepaliveDir, cfg.Keepalive)
@@ -408,6 +409,11 @@ func (h *Handler) modelList() []map[string]any {
 				// 官方 /models 条目形态：name + context_window/max_output_tokens 键名
 				entry["name"] = strings.ToUpper(strings.ReplaceAll(id, "-", " "))
 				delete(entry, "created")
+			}
+			if h.maskUpstream && (ownedBy == "z-ai" || ownedBy == "moonshot") {
+				// 官方极简条目（bigmodel 实测 / moonshot 文档）：四键
+				delete(entry, "context_length")
+				delete(entry, "max_output_tokens")
 			}
 			if h.maskUpstream && ownedBy == "z-ai" {
 				// 官方 glm /models 条目极简：{id, object, created, owned_by}
@@ -828,7 +834,14 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		if until := rt.Pool.ModelCoolUntil(routeModel); !until.IsZero() {
 			msg += " (reset " + until.Format(time.RFC3339) + ")"
 		}
-		writeOpenAIError(w, http.StatusTooManyRequests, "model_rate_limited", msg)
+		if h.maskUpstream {
+			// 掩码模式：官方措辞（"accounts"=多号池特征不外露），细节进日志
+			log.Printf("masked 429 detail: %s", msg)
+			writeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_exceeded",
+				fmt.Sprintf("Rate limit exceeded for model %s. Please try again later.", routeModel))
+		} else {
+			writeOpenAIError(w, http.StatusTooManyRequests, "model_rate_limited", msg)
+		}
 		h.finishReqLog(t0, model, rt.Kind.String(), "", http.StatusTooManyRequests, false, 0, nil, body)
 		return nil, "", false
 	}
@@ -1013,7 +1026,13 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 	if lastErr != nil {
 		msg += ": " + lastErr.Error()
 	}
-	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
+	if h.maskUpstream {
+		log.Printf("masked 503 detail: %s", msg)
+		writeOpenAIError(w, http.StatusServiceUnavailable, "service_unavailable",
+			"The service is temporarily overloaded. Please try again later.")
+	} else {
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
+	}
 	h.finishReqLog(t0, model, rt.Kind.String(), "", http.StatusServiceUnavailable, false, 0, nil, body)
 	return nil, "", false
 }
@@ -1078,6 +1097,10 @@ func resolveModelAlias(name string) string {
 	return name
 }
 
+// maskUpstreamDefault 进程级掩码默认（runtimeForModel 为自由函数用；由
+// NewHandler 按 config 同步，与 Handler.maskUpstream 一致）。
+var maskUpstreamDefault = true
+
 func (h *Handler) runtimeForModel(model string) (*Runtime, string, error) {
 	model = strings.TrimSpace(model)
 	parts := strings.SplitN(model, "/", 2)
@@ -1125,6 +1148,10 @@ func (h *Handler) runtimeForModel(model string) (*Runtime, string, error) {
 	}
 	if active == 1 && fallback != nil {
 		return fallback, model, nil
+	}
+	if maskUpstreamDefault {
+		// 掩码模式：官方式文案（渠道名列表=多渠道中转特征，不外露）
+		return nil, "", fmt.Errorf("The model %q does not exist or you do not have access to it.", model)
 	}
 	return nil, "", fmt.Errorf("model %q not found; use explicit prefix: workbuddy/<model> / traework/<model> / qoder/<model> / qclaw/<model>", model)
 }
