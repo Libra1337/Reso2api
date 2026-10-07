@@ -410,21 +410,17 @@ func (h *Handler) modelList() []map[string]any {
 				entry["name"] = strings.ToUpper(strings.ReplaceAll(id, "-", " "))
 				delete(entry, "created")
 			}
-			if h.maskUpstream && (ownedBy == "z-ai" || ownedBy == "moonshot") {
-				// 官方极简条目（bigmodel 实测 / moonshot 文档）：四键
-				delete(entry, "context_length")
-				delete(entry, "max_output_tokens")
-			}
-			if h.maskUpstream && ownedBy == "z-ai" {
-				// 官方 glm /models 条目极简：{id, object, created, owned_by}
-				delete(entry, "context_length")
-				delete(entry, "max_output_tokens")
-			}
 			if mi.ContextWindow > 0 {
 				entry["context_length"] = mi.ContextWindow
 			}
 			if mi.MaxTokens > 0 {
 				entry["max_output_tokens"] = mi.MaxTokens
+			}
+			if h.maskUpstream && ownedBy == "z-ai" || h.maskUpstream && ownedBy == "moonshot" {
+				// 官方极简条目（bigmodel 实测 / moonshot 文档）：
+				// {id, object, created, owned_by}——须在补录 context/max 之后删
+				delete(entry, "context_length")
+				delete(entry, "max_output_tokens")
 			}
 			out = append(out, entry)
 			if v, ok := thinkVariant(entry); ok {
