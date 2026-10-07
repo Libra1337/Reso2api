@@ -292,61 +292,80 @@ func (u *paramErrUpstream) ChatStream(*auth.Auth, []byte) (io.ReadCloser, int, [
 		[]byte(`{"code":11133,"msg":"invalid params by www.codebuddy.cn","requestId":"wb-xyz"}`), nil
 }
 
-// 响应指纹掩码：SSE id 换 chatcmpl-、model 回显请求名、usage 剥非标字段。
-func TestSSEMaskWriter(t *testing.T) {
-	rec := httptest.NewRecorder()
-	mw := newSSEMaskWriter(rec, "glm-5.3")
-	in := "data: {\"id\":\"cmb-abc\",\"model\":\"glm-5.3\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
-		"data: {\"id\":\"cmb-abc\",\"model\":\"glm-5.3\",\"object\":\"chat.completion.chunk\",\"usage\":{\"prompt_tokens\":14,\"completion_tokens\":20,\"credit\":0.01,\"prompt_cache_hit_tokens\":900,\"prompt_cache_miss_tokens\":14,\"completion_thinking_tokens\":18,\"cache_creation_input_tokens\":0,\"prompt_tokens_details\":{\"cached_tokens\":0}},\"choices\":[]}\n\n" +
-		"data: [DONE]\n\n"
-	if n, err := mw.Write([]byte(in)); err != nil || n != len(in) {
-		t.Fatalf("write n=%d err=%v", n, err)
+// 响应指纹按家族模仿官方：deepseek=纯UUID+prompt_cache_hit/miss+system_fingerprint；
+// glm=chatcmpl-+标准 cached_tokens；上游 cmb-/credit/thinking 等不外露。
+func TestSSEMaskWriterFamilies(t *testing.T) {
+	run := func(model string) string {
+		rec := httptest.NewRecorder()
+		mw := newSSEMaskWriter(rec, model)
+		in := "data: {\"id\":\"cmb-abc\",\"model\":\"" + model + "\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+			"data: {\"id\":\"cmb-abc\",\"model\":\"" + model + "\",\"object\":\"chat.completion.chunk\",\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":20,\"total_tokens\":1020,\"credit\":0.01,\"prompt_cache_hit_tokens\":900,\"prompt_cache_miss_tokens\":100,\"completion_thinking_tokens\":18,\"cache_creation_input_tokens\":0,\"cached_tokens\":0,\"completion_tokens_details\":{\"reasoning_tokens\":18},\"prompt_tokens_details\":{\"cached_tokens\":0,\"audio_tokens\":0}},\"choices\":[]}\n\n" +
+			"data: [DONE]\n\n"
+		mw.Write([]byte(in))
+		mw.Flush()
+		return rec.Body.String()
 	}
-	mw.Flush()
-	out := rec.Body.String()
-	if strings.Contains(out, "cmb-") || strings.Contains(out, "credit") ||
-		strings.Contains(out, "prompt_cache_hit_tokens") || strings.Contains(out, "completion_thinking_tokens") {
-		t.Fatalf("fingerprint leaked:\n%s", out)
-	}
-	if !strings.Contains(out, "chatcmpl-") {
-		t.Fatalf("id not rewritten:\n%s", out)
-	}
-	if !strings.Contains(out, "\"cached_tokens\":900") {
-		t.Fatalf("cache hit not mapped to cached_tokens:\n%s", out)
-	}
-	if !strings.Contains(out, "[DONE]") {
-		t.Fatalf("DONE frame lost:\n%s", out)
-	}
-	// 同流 id 稳定
-	first := strings.Index(out, "chatcmpl-")
-	second := strings.Index(out[first+1:], "chatcmpl-")
-	if second >= 0 {
-		a := out[first : first+22]
-		b := out[first+1+second : first+1+second+22]
-		if a != b {
-			t.Fatalf("id must be stable within stream: %q vs %q", a, b)
+
+	// deepseek 家族（官方实测定稿）
+	out := run("deepseek-v4.1-flash")
+	for _, leak := range []string{"cmb-", "credit", "completion_thinking_tokens", "completion_tokens_details", "deepseek-v4.1"} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("deepseek leak %q:\n%s", leak, out)
 		}
+	}
+	if !strings.Contains(out, "\"model\":\"deepseek-flash\"") {
+		t.Fatalf("deepseek must echo official name:\n%s", out)
+	}
+	var chunk struct {
+		ID   string         `json:"id"`
+		Usage map[string]any `json:"usage"`
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "data: {") && strings.Contains(line, "usage") {
+			_ = json.Unmarshal([]byte(line[6:]), &chunk)
+		}
+	}
+	if len(strings.Split(chunk.ID, "-")) != 5 { // 纯 UUID 形态
+		t.Fatalf("deepseek id not uuid: %q", chunk.ID)
+	}
+	if len(chunk.Usage) != 6 || chunk.Usage["prompt_cache_hit_tokens"] != float64(900) || chunk.Usage["prompt_cache_miss_tokens"] != float64(100) {
+		t.Fatalf("deepseek usage must be official 6-key shape: %v", chunk.Usage)
+	}
+	if !strings.Contains(out, "system_fingerprint") {
+		t.Fatal("deepseek must carry system_fingerprint")
+	}
+
+	// glm 家族（zhipu 形）
+	out = run("glm-5.3")
+	if strings.Contains(out, "prompt_cache_hit_tokens") || strings.Contains(out, "credit") {
+		t.Fatalf("glm usage must be openai shape:\n%s", out)
+	}
+	if !strings.Contains(out, "chatcmpl-") || !strings.Contains(out, "\"cached_tokens\":900") {
+		t.Fatalf("glm id/cached_tokens wrong:\n%s", out)
 	}
 }
 
-// 非流式掩码：resp map 的 id/model/usage 同样清洗。
+// 非流式掩码：resp map 的 id/model/usage 按家族清洗。
 func TestMaskAggregateResp(t *testing.T) {
 	resp := map[string]any{
-		"id": "cmb-xyz", "model": "glm-5.3",
-		"usage": map[string]any{"prompt_tokens": 10, "credit": 0.5, "prompt_cache_hit_tokens": float64(8)},
+		"id": "cmb-xyz", "model": "deepseek-v4.1-flash",
+		"usage": map[string]any{"prompt_tokens": float64(10), "credit": 0.5, "prompt_cache_hit_tokens": float64(8)},
 	}
-	maskAggregateResp(resp, "glm-5.3")
-	if id, _ := resp["id"].(string); !strings.HasPrefix(id, "chatcmpl-") {
+	maskAggregateResp(resp, "deepseek-v4.1-flash")
+	if id, _ := resp["id"].(string); len(strings.Split(id, "-")) != 5 {
 		t.Fatalf("id=%v", resp["id"])
+	}
+	if resp["model"] != "deepseek-flash" {
+		t.Fatalf("model=%v", resp["model"])
+	}
+	if resp["system_fingerprint"] == nil {
+		t.Fatal("deepseek non-stream must carry system_fingerprint")
 	}
 	u := resp["usage"].(map[string]any)
 	if _, ok := u["credit"]; ok {
 		t.Fatal("credit must be stripped")
 	}
-	if _, ok := u["prompt_cache_hit_tokens"]; ok {
-		t.Fatal("prompt_cache_hit_tokens must be stripped")
-	}
-	if u["cached_tokens"] != float64(8) {
-		t.Fatalf("cached_tokens=%v", u["cached_tokens"])
+	if u["prompt_cache_hit_tokens"] != float64(8) {
+		t.Fatalf("hit=%v", u["prompt_cache_hit_tokens"])
 	}
 }

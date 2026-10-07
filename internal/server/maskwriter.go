@@ -1,16 +1,22 @@
 // maskwriter.go 响应侧上游特征掩码（features.mask_upstream，默认开）。
 //
-// 出站响应里可被识别为特定上游的指纹：
-//   - 响应 id 前缀（如 cmb-…）：OpenAI 形态是 chatcmpl-…；
-//   - usage 的非标字段：credit / prompt_cache_hit_tokens / prompt_cache_miss_tokens /
-//     prompt_cache_write_tokens / cache_read_input_tokens / cache_creation_input_tokens /
-//     completion_thinking_tokens（上游计费口径特有）；
-//   - model 回显与请求名不一致（带前缀调用时回显裸名）。
+// 目标不是"中性 OpenAI"，而是**按模型家族模仿各家官方 API 的响应指纹**
+//（2026-10-07 官方 DeepSeek API 实测定稿）：
 //
-// 处理：SSE 逐行变换（id 换为流内稳定的 chatcmpl- 随机段；model 改为请求的
-// 展示名；含 usage 的块解析后剔除非标字段，命中数并入标准
-// prompt_tokens_details.cached_tokens 与顶层 cached_tokens）。非 data 行
-// （注释心跳/空行）原样透传；mask 关闭时整体旁路。
+//	deepseek 家族（实测 api.deepseek.com）：
+//	  id=纯 UUID（无 chatcmpl- 前缀）、model=官方名（deepseek-v4.1-flash →
+//	  deepseek-flash，官方对别名请求也回显官方名）、usage 恰好六键 =
+//	  {prompt_tokens, completion_tokens, total_tokens,
+//	   prompt_tokens_details:{cached_tokens}, prompt_cache_hit_tokens,
+//	   prompt_cache_miss_tokens}、每块带 system_fingerprint:<32hex>。
+//	kimi 家族（moonshot 形）：id=cmpl-<hex>，usage 标准 OpenAI 三件套 +
+//	  prompt_tokens_details.cached_tokens，无 cache 专有字段。
+//	glm 家族（zhipu 形）：id=chatcmpl-<hex>，usage 同 openai 形。
+//	其余：openai 中性形（id=chatcmpl-<hex>）。
+//
+// 上游真实指纹（cmb- 前缀 id、credit/completion_thinking_tokens 等 7 个非标
+// usage 字段）全部剥除/改写。面板与 reqlog 的缓存统计在 tee 层解析（先于掩码），
+// 不受影响。mask 关闭时整体旁路。
 package server
 
 import (
@@ -20,30 +26,118 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 )
 
-// nonstandardUsageKeys 上游特有 usage 字段（对外剥除；面板统计在 tee 层
-// 解析，先于掩码，不受影响）。
-var nonstandardUsageKeys = []string{
+// officialModelNames 上游模型名 → 官方 API 模型名（deepseek 家族实测；
+// 其余家族官方名与我们的裸名一致）。
+var officialModelNames = map[string]string{
+	"deepseek-v4.1-flash": "deepseek-flash",
+	"deepseek-v4-flash":   "deepseek-flash",
+	"deepseek-v4-pro":     "deepseek-v4-pro",
+}
+
+// maskFamily 模型 → 指纹家族。
+func maskFamily(display string) string {
+	switch {
+	case strings.HasPrefix(display, "deepseek"):
+		return "deepseek"
+	case strings.HasPrefix(display, "kimi"):
+		return "kimi"
+	case strings.HasPrefix(display, "glm"):
+		return "glm"
+	}
+	return "openai"
+}
+
+// officialDisplayName 出站回显名：deepseek 家族映射官方名，其余用请求裸名。
+func officialDisplayName(display string) string {
+	if n, ok := officialModelNames[display]; ok {
+		return n
+	}
+	return display
+}
+
+// stripUsageKeys 无论家族都剥除的上游特有键。
+var stripUsageKeys = []string{
 	"credit",
-	"prompt_cache_hit_tokens",
-	"prompt_cache_miss_tokens",
 	"prompt_cache_write_tokens",
 	"cache_read_input_tokens",
 	"cache_creation_input_tokens",
 	"completion_thinking_tokens",
+	"completion_tokens_details",
+	"cached_tokens", // 顶层 cached_tokens 是上游冗余；标准位在 prompt_tokens_details
+}
+
+// deepseekSysFingerprint 官方 DeepSeek 每响应带 system_fingerprint（模型版本
+// 级稳定值）；进程内生成一个稳定假值，同进程所有 deepseek 响应一致。
+var deepseekSysFingerprint = func() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}()
+
+var maskRandMu sync.Mutex
+
+func maskRandHex(n int) string {
+	b := make([]byte, n)
+	maskRandMu.Lock()
+	_, _ = rand.Read(b)
+	maskRandMu.Unlock()
+	return hex.EncodeToString(b)
+}
+
+// maskID 按家族生成响应 id（流内由调用方保持稳定）。
+func maskID(family string) string {
+	switch family {
+	case "deepseek": // 官方实测：纯 UUID v4 形态
+		h := maskRandHex(16)
+		return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+	case "kimi":
+		return "cmpl-" + maskRandHex(12)
+	default: // glm / openai
+		return "chatcmpl-" + maskRandHex(12)
+	}
+}
+
+// sanitizeUsageFor 就地按家族清洗 usage。
+func sanitizeUsageFor(u map[string]any, family string) {
+	hit := 0.0
+	if v, ok := u["prompt_cache_hit_tokens"].(float64); ok {
+		hit = v
+	}
+	prompt := 0.0
+	if v, ok := u["prompt_tokens"].(float64); ok {
+		prompt = v
+	}
+	for _, k := range stripUsageKeys {
+		delete(u, k)
+	}
+	switch family {
+	case "deepseek":
+		// 官方六键形态：保留 prompt_cache_hit/miss，重建 prompt_tokens_details。
+		u["prompt_tokens_details"] = map[string]any{"cached_tokens": hit}
+		u["prompt_cache_hit_tokens"] = hit
+		u["prompt_cache_miss_tokens"] = prompt - hit
+	default:
+		// openai/moonshot/zhipu 形：无 cache 专有字段，标准 cached_tokens 位。
+		delete(u, "prompt_cache_hit_tokens")
+		delete(u, "prompt_cache_miss_tokens")
+		u["prompt_tokens_details"] = map[string]any{"cached_tokens": hit}
+	}
 }
 
 // sseMaskWriter 客户端侧 SSE 掩码写入器（行缓冲）。
 type sseMaskWriter struct {
 	w           http.ResponseWriter
-	displayName string // 请求侧展示模型名（裸名）；空=不改写 model
+	displayName string // 请求侧展示模型名（裸名）
+	family      string
 	newID       string
 	buf         []byte
 }
 
 func newSSEMaskWriter(w http.ResponseWriter, displayName string) *sseMaskWriter {
-	return &sseMaskWriter{w: w, displayName: displayName}
+	return &sseMaskWriter{w: w, displayName: displayName, family: maskFamily(displayName)}
 }
 
 func (m *sseMaskWriter) Header() http.Header { return m.w.Header() }
@@ -96,32 +190,39 @@ func (m *sseMaskWriter) transformLine(line []byte) ([]byte, bool) {
 	if len(payload) == 0 || payload[0] != '{' {
 		return nil, false
 	}
-	changed := false
 	var obj map[string]any
 	if err := json.Unmarshal(payload, &obj); err != nil {
 		return nil, false
 	}
-	// id：非 chatcmpl- 前缀 → 流内稳定的随机 chatcmpl-
-	if id, _ := obj["id"].(string); id != "" && !strings.HasPrefix(id, "chatcmpl-") {
+	changed := false
+	// id：家族化改写（上游 cmb- → 官方形态），流内稳定
+	if id, _ := obj["id"].(string); id != "" {
 		if m.newID == "" {
-			m.newID = "chatcmpl-" + randHex12()
+			m.newID = maskID(m.family)
 		}
-		obj["id"] = m.newID
-		changed = true
-	}
-	// model：回显请求侧展示名
-	if m.displayName != "" {
-		if mdl, _ := obj["model"].(string); mdl != "" && mdl != m.displayName {
-			obj["model"] = m.displayName
+		if id != m.newID {
+			obj["id"] = m.newID
 			changed = true
 		}
 	}
-	// usage：剥非标字段，命中数并入标准位
+	// model：回显家族官方名
+	if name := officialDisplayName(m.displayName); name != "" {
+		if mdl, _ := obj["model"].(string); mdl != "" && mdl != name {
+			obj["model"] = name
+			changed = true
+		}
+	}
+	// system_fingerprint：deepseek 家族官方指纹
+	if m.family == "deepseek" && obj["object"] != nil {
+		if fp, _ := obj["system_fingerprint"].(string); fp != deepseekSysFingerprint {
+			obj["system_fingerprint"] = deepseekSysFingerprint
+			changed = true
+		}
+	}
 	if u, ok := obj["usage"].(map[string]any); ok {
-		if sanitizeUsage(u) {
-			obj["usage"] = u
-			changed = true
-		}
+		sanitizeUsageFor(u, m.family)
+		obj["usage"] = u
+		changed = true
 	}
 	if !changed {
 		return nil, false
@@ -137,53 +238,24 @@ func (m *sseMaskWriter) transformLine(line []byte) ([]byte, bool) {
 	return append([]byte("data: "), append(out, nl...)...), true
 }
 
-// sanitizeUsage 就地清洗 usage map：删非标键；prompt_cache_hit_tokens 值并入
-// prompt_tokens_details.cached_tokens 与顶层 cached_tokens。返回是否修改。
-func sanitizeUsage(u map[string]any) bool {
-	changed := false
-	var hit float64
-	if v, ok := u["prompt_cache_hit_tokens"].(float64); ok {
-		hit = v
-	}
-	for _, k := range nonstandardUsageKeys {
-		if _, ok := u[k]; ok {
-			delete(u, k)
-			changed = true
-		}
-	}
-	if hit > 0 {
-		if d, ok := u["prompt_tokens_details"].(map[string]any); ok {
-			d["cached_tokens"] = hit
-			u["prompt_tokens_details"] = d
-		}
-		u["cached_tokens"] = hit
-		changed = true
-	}
-	return changed
-}
-
-// maskAggregateResp 非流式响应 map 掩码（id/model/usage 同上）。
+// maskAggregateResp 非流式响应 map 掩码（id/model/usage/system_fingerprint）。
 func maskAggregateResp(resp map[string]any, displayName string) {
 	if resp == nil {
 		return
 	}
-	if id, _ := resp["id"].(string); id != "" && !strings.HasPrefix(id, "chatcmpl-") {
-		resp["id"] = "chatcmpl-" + randHex12()
+	family := maskFamily(displayName)
+	if id, _ := resp["id"].(string); id != "" {
+		resp["id"] = maskID(family)
 	}
-	if displayName != "" {
-		if mdl, _ := resp["model"].(string); mdl != "" {
-			resp["model"] = displayName
-		}
+	if name := officialDisplayName(displayName); name != "" {
+		resp["model"] = name
+	}
+	if family == "deepseek" {
+		resp["system_fingerprint"] = deepseekSysFingerprint
 	}
 	if u, ok := resp["usage"].(map[string]any); ok {
-		sanitizeUsage(u)
+		sanitizeUsageFor(u, family)
 	}
-}
-
-func randHex12() string {
-	b := make([]byte, 12)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
 }
 
 // displayNameFor 对请求模型名取对外展示名（去渠道前缀）。

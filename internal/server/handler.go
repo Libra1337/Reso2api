@@ -380,9 +380,20 @@ func (h *Handler) modelList() []map[string]any {
 				if _, bare, ok := strings.Cut(id, "/"); ok {
 					id = bare
 				}
-				ownedBy = "system"
+				// 家族化 owned_by（官方 /models 口径：deepseek/moonshot/zhipu）
+				ownedBy = map[string]string{"deepseek": "deepseek", "kimi": "moonshot", "glm": "zhipu"}[maskFamily(id)]
+				if ownedBy == "" {
+					ownedBy = "system"
+				}
+				// deepseek 家族：id 用官方名（官方对别名也回显官方名）
+				id = officialDisplayName(id)
 			}
 			entry := map[string]any{"id": id, "object": "model", "created": 1753600000, "owned_by": ownedBy}
+			if h.maskUpstream && ownedBy == "deepseek" {
+				// 官方 /models 条目形态：name + context_window/max_output_tokens 键名
+				entry["name"] = strings.ToUpper(strings.ReplaceAll(id, "-", " "))
+				delete(entry, "created")
+			}
 			if mi.ContextWindow > 0 {
 				entry["context_length"] = mi.ContextWindow
 			}
