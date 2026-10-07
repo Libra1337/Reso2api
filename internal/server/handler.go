@@ -381,7 +381,7 @@ func (h *Handler) modelList() []map[string]any {
 					id = bare
 				}
 				// 家族化 owned_by（官方 /models 口径：deepseek/moonshot/zhipu）
-				ownedBy = map[string]string{"deepseek": "deepseek", "kimi": "moonshot", "glm": "zhipu"}[maskFamily(id)]
+				ownedBy = map[string]string{"deepseek": "deepseek", "kimi": "moonshot", "glm": "z-ai"}[maskFamily(id)]
 				if ownedBy == "" {
 					ownedBy = "system"
 				}
@@ -393,6 +393,11 @@ func (h *Handler) modelList() []map[string]any {
 				// 官方 /models 条目形态：name + context_window/max_output_tokens 键名
 				entry["name"] = strings.ToUpper(strings.ReplaceAll(id, "-", " "))
 				delete(entry, "created")
+			}
+			if h.maskUpstream && ownedBy == "z-ai" {
+				// 官方 glm /models 条目极简：{id, object, created, owned_by}
+				delete(entry, "context_length")
+				delete(entry, "max_output_tokens")
 			}
 			if mi.ContextWindow > 0 {
 				entry["context_length"] = mi.ContextWindow

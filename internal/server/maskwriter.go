@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 // officialModelNames 上游模型名 → 官方 API 模型名（deepseek 家族实测；
@@ -95,7 +96,10 @@ func maskID(family string) string {
 		return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 	case "kimi":
 		return "cmpl-" + maskRandHex(12)
-	default: // glm / openai
+	case "glm":
+		// 官方实测：<14 位日期时间><17 hex>，且顶层 request_id 与 id 同值
+		return time.Now().Format("20060102150405") + maskRandHex(9)[:17]
+	default: // openai
 		return "chatcmpl-" + maskRandHex(12)
 	}
 }
@@ -119,8 +123,22 @@ func sanitizeUsageFor(u map[string]any, family string) {
 		u["prompt_tokens_details"] = map[string]any{"cached_tokens": hit}
 		u["prompt_cache_hit_tokens"] = hit
 		u["prompt_cache_miss_tokens"] = prompt - hit
+	case "glm":
+		// 官方恒三键（无任何 cache/明细字段）
+		keep := map[string]any{}
+		for _, k := range []string{"prompt_tokens", "completion_tokens", "total_tokens"} {
+			if v, ok := u[k]; ok {
+				keep[k] = v
+			}
+		}
+		for k := range u {
+			delete(u, k)
+		}
+		for k, v := range keep {
+			u[k] = v
+		}
 	default:
-		// openai/moonshot/zhipu 形：无 cache 专有字段，标准 cached_tokens 位。
+		// openai/moonshot 形：无 cache 专有字段，标准 cached_tokens 位。
 		delete(u, "prompt_cache_hit_tokens")
 		delete(u, "prompt_cache_miss_tokens")
 		u["prompt_tokens_details"] = map[string]any{"cached_tokens": hit}
@@ -219,6 +237,13 @@ func (m *sseMaskWriter) transformLine(line []byte) ([]byte, bool) {
 			changed = true
 		}
 	}
+	// glm 家族：顶层 request_id 与 id 同值（官方实测）
+	if m.family == "glm" {
+		if rid, _ := obj["request_id"].(string); rid != m.newID {
+			obj["request_id"] = m.newID
+			changed = true
+		}
+	}
 	if u, ok := obj["usage"].(map[string]any); ok {
 		sanitizeUsageFor(u, m.family)
 		obj["usage"] = u
@@ -252,6 +277,11 @@ func maskAggregateResp(resp map[string]any, displayName string) {
 	}
 	if family == "deepseek" {
 		resp["system_fingerprint"] = deepseekSysFingerprint
+	}
+	if family == "glm" {
+		if id, _ := resp["id"].(string); id != "" {
+			resp["request_id"] = id
+		}
 	}
 	if u, ok := resp["usage"].(map[string]any); ok {
 		sanitizeUsageFor(u, family)

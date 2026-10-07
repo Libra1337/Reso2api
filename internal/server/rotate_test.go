@@ -335,13 +335,28 @@ func TestSSEMaskWriterFamilies(t *testing.T) {
 		t.Fatal("deepseek must carry system_fingerprint")
 	}
 
-	// glm 家族（zhipu 形）
+	// glm 家族（实测 z-ai 形）：id=时间戳+hex、顶层 request_id 同值、usage 恒三键
 	out = run("glm-5.3")
-	if strings.Contains(out, "prompt_cache_hit_tokens") || strings.Contains(out, "credit") {
-		t.Fatalf("glm usage must be openai shape:\n%s", out)
+	for _, leak := range []string{"prompt_cache_hit_tokens", "credit", "cached_tokens", "completion_tokens_details", "prompt_tokens_details"} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("glm usage must be 3-key official shape (leak %q):\n%s", leak, out)
+		}
 	}
-	if !strings.Contains(out, "chatcmpl-") || !strings.Contains(out, "\"cached_tokens\":900") {
-		t.Fatalf("glm id/cached_tokens wrong:\n%s", out)
+	if !strings.Contains(out, "\"request_id\":\"") || !strings.Contains(out, "\"id\":\"2026") {
+		t.Fatalf("glm must carry timestamp id + request_id:\n%s", out)
+	}
+	var u3 map[string]any
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "data: {") && strings.Contains(line, "usage") {
+			var c struct {
+				Usage map[string]any `json:"usage"`
+			}
+			_ = json.Unmarshal([]byte(line[6:]), &c)
+			u3 = c.Usage
+		}
+	}
+	if len(u3) != 3 {
+		t.Fatalf("glm usage keys=%d want 3: %v", len(u3), u3)
 	}
 }
 
