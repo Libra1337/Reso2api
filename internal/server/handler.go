@@ -64,6 +64,8 @@ type Config struct {
 	MaskUpstream *bool
 	// Routing 溢流路由（超大上下文改发缓存稳定模型，见 config.Routing）
 	Routing      config.Routing
+	Keepalive    config.KeepaliveConfig
+	KeepaliveDir string
 	HardCooldown time.Duration
 	SoftCooldown time.Duration
 	ErrThreshold int
@@ -99,6 +101,7 @@ type Handler struct {
 	// 首轮无记录时按 body 字节估算）。与 sticky 同规格淘汰。
 	sessInMu   sync.Mutex
 	sessLastIn map[string]int64
+	ka         *keepaliveStore // 前缀缓存保活（cache_keepalive.enabled 时启用）
 	stickyMu   sync.RWMutex
 	sticky     map[string]*stickyEntry // stickyKey(kind, 会话指纹) → stickyEntry
 	reqLogs    reqLogStore             // 请求级日志（环形）
@@ -133,6 +136,10 @@ func NewHandler(cfg Config) *Handler {
 		maskUpstream = *cfg.MaskUpstream
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), maskUpstream: maskUpstream, sessLastIn: make(map[string]int64)}
+	if cfg.Keepalive.Enabled {
+		h.ka = newKeepaliveStore(cfg.KeepaliveDir, cfg.Keepalive)
+		h.runKeepaliveLoop(h.ka)
+	}
 	h.reqLogs.path = cfg.RequestLogPath
 	h.reqLogs.legacy = cfg.RequestLogLegacyPath
 	if cfg.PGStore != nil {
@@ -609,6 +616,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rc.Close()
+	if h.ka != nil {
+		h.ka.track(session, rt.Kind.String(), uid, body)
+	}
 	bodyFile := h.reqLogs.SaveBodyArchive(body)
 	body = nil
 	fbw := newFirstByteWriter(w, t0)
@@ -654,6 +664,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.finishReqLogFile(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, true, fbw.ttfb(), tee.snapshot(), bodyFile)
 		if u := tee.snapshot(); u != nil {
 			h.noteSessionIn(session, num(u["prompt_tokens"]))
+			if h.ka != nil {
+				h.ka.noteIn(session, num(u["prompt_tokens"]))
+			}
 		}
 		h.noteQuality(rt, uid, tee)
 		_ = err
@@ -670,6 +683,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	usage, _ := resp["usage"].(map[string]any)
 	h.finishReqLogFile(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, false, 0, usage, bodyFile)
 	h.noteSessionIn(session, num(usage["prompt_tokens"]))
+	if h.ka != nil {
+		h.ka.noteIn(session, num(usage["prompt_tokens"]))
+	}
 	h.noteQualityMap(rt, uid, usage, respToolCalled(resp))
 	if h.maskUpstream {
 		maskAggregateResp(resp, displayNameFor(requestedModel))

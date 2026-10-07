@@ -264,6 +264,9 @@ func main() {
 		AttachAPI:            appInst.HandleAPI,
 		PGStore:              pgDB,
 		MaskUpstream:         cfg.Features.MaskUpstream,
+		Routing:              cfg.Routing,
+		Keepalive:            cfg.Keepalive,
+		KeepaliveDir:         filepath.Join(stateDir, "keepalive"),
 	})
 	appInst.SetHandler(h)
 	defer h.Close() // 关闭请求日志 journal 句柄 / PG 写入队列 flush

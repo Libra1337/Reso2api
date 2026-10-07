@@ -145,6 +145,8 @@ type Config struct {
 		JudgeTimeoutMS int    `json:"judge_timeout_ms,omitempty"`
 	} `json:"features"`
 
+	Keepalive KeepaliveConfig `json:"cache_keepalive,omitempty"`
+
 	Prompt struct {
 		// Mode 系统提示词策略：passthrough（默认，透传+11128 降级重试）/ custom（整段替换）
 		Mode string `json:"mode"` // custom / passthrough
@@ -185,6 +187,37 @@ type Routing struct {
 type OverflowRule struct {
 	OverTokens int    `json:"over_tokens"`
 	To         string `json:"to"`
+}
+
+// KeepaliveConfig 前缀缓存保活配置（config.cache_keepalive）：
+// 闲置大上下文会话定时同账号重放前缀，刷新上游缓存条目。
+type KeepaliveConfig struct {
+	Enabled      bool `json:"enabled"`
+	MinTokens    int  `json:"min_tokens"`     // 只保活 ≥ 此 in_tokens 的会话（默认 150000）
+	IdleAfterMin int  `json:"idle_after_min"` // 闲置多少分钟后开始保活（默认 6）
+	WindowMin    int  `json:"window_min"`     // 最后一次真实请求后多少分钟内保活（默认 45）
+	PingEveryMin int  `json:"ping_every_min"` // 保活间隔（默认 8）
+	MaxPings     int  `json:"max_pings"`      // 每轮闲置最多保活次数（默认 6）
+}
+
+// Normalized 补默认值。
+func (c KeepaliveConfig) Normalized() KeepaliveConfig {
+	if c.MinTokens <= 0 {
+		c.MinTokens = 150000
+	}
+	if c.IdleAfterMin <= 0 {
+		c.IdleAfterMin = 6
+	}
+	if c.WindowMin <= 0 {
+		c.WindowMin = 45
+	}
+	if c.PingEveryMin <= 0 {
+		c.PingEveryMin = 8
+	}
+	if c.MaxPings <= 0 {
+		c.MaxPings = 6
+	}
+	return c
 }
 
 // Default 默认配置。

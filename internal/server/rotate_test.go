@@ -416,3 +416,73 @@ func TestApplyOverflow(t *testing.T) {
 		t.Fatal("no-rule model must be untouched")
 	}
 }
+
+// 缓存保活：大 body 落盘跟踪、小 body 不跟踪；闲置到点触发同账号重放且
+// max_tokens 压到 16（不进 reqlog、不动 messages）。
+func TestCacheKeepalive(t *testing.T) {
+	dir := t.TempDir()
+	store := newKeepaliveStore(dir, config.KeepaliveConfig{
+		Enabled: true, MinTokens: 1000, IdleAfterMin: 6, WindowMin: 45, PingEveryMin: 8, MaxPings: 6,
+	})
+	small := []byte(`{"model":"glm-5.3-flash","messages":[{"role":"user","content":"hi"}]}`)
+	store.track("s-small", "workbuddy", "u1", small)
+	if len(store.entries) != 0 {
+		t.Fatal("small body must not be tracked")
+	}
+	big := []byte(`{"model":"glm-5.3-flash","max_tokens":4096,"messages":[{"role":"user","content":"` + strings.Repeat("大", 5000) + `"}]}`)
+	store.track("s-big", "workbuddy", "u1", big)
+	if len(store.entries) != 1 {
+		t.Fatalf("entries=%d want 1", len(store.entries))
+	}
+	e := store.entries["s-big"]
+	if e.uid != "u1" || e.file == "" {
+		t.Fatalf("entry=%+v", e)
+	}
+	// 未到闲置时间：不触发
+	if due := store.sweepDue(e.lastSeen.Add(2 * time.Minute)); len(due) != 0 {
+		t.Fatal("must not ping before idle_after")
+	}
+	// 闲置 7 分钟：触发一次
+	due := store.sweepDue(e.lastSeen.Add(7 * time.Minute))
+	if len(due) != 1 || due[0] != e {
+		t.Fatalf("due=%d", len(due))
+	}
+	store.done(e)
+	// 8 分钟内不重复
+	if due := store.sweepDue(e.lastSeen.Add(12 * time.Minute)); len(due) != 0 {
+		t.Fatal("must respect ping_every interval")
+	}
+	// max_tokens 压缩
+	small2 := rewriteMaxTokensSmall(big)
+	if !strings.Contains(string(small2), `"max_tokens":16`) {
+		t.Fatalf("max_tokens not rewritten: %.80s", small2)
+	}
+
+	// 端到端 ping：同账号、不炸、上游收到 16
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "t", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	up := &keepaliveFakeUpstream{}
+	h := NewHandler(Config{Pool: p, Upstream: up, MaxRotate: 5})
+	h.ka = store
+	h.keepalivePing(store, e)
+	if up.model != "glm-5.3-flash" || up.maxTokens != 16 || up.uid != "u1" {
+		t.Fatalf("ping got model=%s max=%d uid=%s", up.model, up.maxTokens, up.uid)
+	}
+}
+
+type keepaliveFakeUpstream struct {
+	rotateUpstream
+	model     string
+	maxTokens int
+	uid       string
+}
+
+func (u *keepaliveFakeUpstream) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []byte, error) {
+	var obj struct {
+		Model     string `json:"model"`
+		MaxTokens int    `json:"max_tokens"`
+	}
+	_ = json.Unmarshal(body, &obj)
+	u.model, u.maxTokens, u.uid = obj.Model, obj.MaxTokens, a.UID
+	return io.NopCloser(strings.NewReader("data: [DONE]\n\n")), http.StatusOK, nil, nil
+}

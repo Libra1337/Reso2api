@@ -58,5 +58,13 @@
     "mode": "file",
     "postgres_dsn": "",
     "pg_retention_days": 0
+  },
+  "cache_keepalive": {
+    "enabled": false,
+    "min_tokens": 150000,
+    "idle_after_min": 6,
+    "window_min": 45,
+    "ping_every_min": 8,
+    "max_pings": 6
   }
 }
