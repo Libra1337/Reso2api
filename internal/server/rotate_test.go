@@ -336,12 +336,16 @@ func TestSSEMaskWriterFamilies(t *testing.T) {
 		t.Fatal("deepseek must carry system_fingerprint")
 	}
 
-	// glm 家族（实测 z-ai 形）：id=时间戳+hex、顶层 request_id 同值、usage 恒三键
+	// glm 家族（实测 z-ai 形）：id=时间戳+hex、顶层 request_id 同值、usage 三标准键
+	// + 缓存命数字段（监控口径必需，2026-10-07 事故修正）
 	out = run("glm-5.3")
-	for _, leak := range []string{"prompt_cache_hit_tokens", "credit", "cached_tokens", "completion_tokens_details", "prompt_tokens_details"} {
+	for _, leak := range []string{"credit", "cached_tokens", "completion_tokens_details", "prompt_tokens_details", "cluster"} {
 		if strings.Contains(out, leak) {
-			t.Fatalf("glm usage must be 3-key official shape (leak %q):\n%s", leak, out)
+			t.Fatalf("glm usage must be official shape + cache fields (leak %q):\n%s", leak, out)
 		}
+	}
+	if !strings.Contains(out, "prompt_cache_hit_tokens\":900") {
+		t.Fatalf("glm must keep prompt_cache_hit_tokens for monitoring:\n%s", out)
 	}
 	if !strings.Contains(out, "\"request_id\":\"") || !strings.Contains(out, "\"id\":\"2026") {
 		t.Fatalf("glm must carry timestamp id + request_id:\n%s", out)
@@ -356,8 +360,8 @@ func TestSSEMaskWriterFamilies(t *testing.T) {
 			u3 = c.Usage
 		}
 	}
-	if len(u3) != 3 {
-		t.Fatalf("glm usage keys=%d want 3: %v", len(u3), u3)
+	if len(u3) != 5 {
+		t.Fatalf("glm usage keys=%d want 5: %v", len(u3), u3)
 	}
 }
 

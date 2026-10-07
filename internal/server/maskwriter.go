@@ -124,7 +124,7 @@ func sanitizeUsageFor(u map[string]any, family string) {
 		u["prompt_cache_hit_tokens"] = hit
 		u["prompt_cache_miss_tokens"] = prompt - hit
 	case "glm":
-		// 官方恒三键（无任何 cache/明细字段）
+		// 官方恒三键 + 缓存命数字段（同 default 注：监控口径必需，2026-10-07）
 		keep := map[string]any{}
 		for _, k := range []string{"prompt_tokens", "completion_tokens", "total_tokens"} {
 			if v, ok := u[k]; ok {
@@ -137,11 +137,16 @@ func sanitizeUsageFor(u map[string]any, family string) {
 		for k, v := range keep {
 			u[k] = v
 		}
+		u["prompt_cache_hit_tokens"] = hit
+		u["prompt_cache_miss_tokens"] = prompt - hit
 	default:
-		// openai/moonshot 形：无 cache 专有字段，标准 cached_tokens 位。
-		delete(u, "prompt_cache_hit_tokens")
-		delete(u, "prompt_cache_miss_tokens")
+		// openai/moonshot/zhipu 形：保留 prompt_cache_hit/miss_tokens——中转与
+		// 监控按 DeepSeek 口径读缓存命中（2026-10-07 事故：glm 档案按官方形状
+		// 剥掉这两个字段，下游全部显示"无缓存"而实际命中正常；缓存字段不带
+		// 品牌指纹，保留无碍隐身）。
 		u["prompt_tokens_details"] = map[string]any{"cached_tokens": hit}
+		u["prompt_cache_hit_tokens"] = hit
+		u["prompt_cache_miss_tokens"] = prompt - hit
 	}
 }
 
