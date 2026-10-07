@@ -447,12 +447,12 @@ func num(v any) int64 {
 // usageTee 从流经的 chat SSE 字节中提取最后出现的 usage 对象，
 // 并记录是否见过正常收尾（finish_reason 或 [DONE]）——供中断补帧判断。
 type usageTee struct {
-	mu      sync.Mutex
-	buf     []byte
-	usage   map[string]any
-	finished bool // 正常收尾（finish_reason/[DONE]）——中断补帧判断
-	sawTool bool // 流中出现过 tool_calls 增量（质量熔断）
-	finish  string
+	mu        sync.Mutex
+	buf       []byte
+	usage     map[string]any
+	finished  bool // 正常收尾（finish_reason/[DONE]）——中断补帧判断
+	sawTool   bool // 流中出现过 tool_calls 增量（质量熔断）
+	finish    string
 	finishSet bool
 }
 

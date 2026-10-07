@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"wild-work/internal/upstream"
 )
 
 // anthropicDefaultModel 请求模型无法识别（claude-* 等）时的兜底模型。
@@ -279,7 +281,7 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 		hb = startSSEHeartbeat(w, anthropicErrFrame)
 		dw = hb
 	}
-	rc, uid, ok := h.dispatchChat(rt, t0, "anthropic/"+peek.Model, chatBody, dw)
+	rc, uid, ok := h.dispatchChat(rt, t0, "anthropic/"+peek.Model, chatBody, dw, upstream.ConversationFingerprint(chatBody))
 	if hb != nil {
 		w = hb.Stop()
 	}

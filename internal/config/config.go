@@ -152,6 +152,8 @@ type Config struct {
 		File string `json:"file,omitempty"`
 	} `json:"prompt"`
 
+	Routing Routing `json:"routing,omitempty"`
+
 	Storage struct {
 		// Mode 日志存储模式：file（默认，jsonl 追加，零依赖）/ postgres
 		// （请求日志 + 防火墙事件落 PostgreSQL，面板分页走 SQL，可服务端过滤）。
@@ -167,6 +169,22 @@ type Config struct {
 	HardCreditDur  time.Duration `json:"-"`
 	SoftRateDur    time.Duration `json:"-"`
 	ErrCooldownDur time.Duration `json:"-"`
+}
+
+// Routing 路由策略（config.routing）。
+type Routing struct {
+	// Overflow 超大上下文溢流路由：模型 → 规则。请求上下文（按上一轮真实
+	// in_tokens，首轮按 body 字节估算 ~2.6B/token）超过 over_tokens 时改发
+	// to 指定模型。用途：flash 类缓存淘汰快（实测 glm-5.3-flash 闲置
+	// 10-20min 后 24 万+ token 整单零命中），超大上下文溢流到缓存稳定的
+	// glm-5.3（345k+ 仍 85%），响应 model 字段仍回显请求名，客户端无感。
+	Overflow map[string]OverflowRule `json:"overflow,omitempty"`
+}
+
+// OverflowRule 溢流规则（routing.overflow 的值）。
+type OverflowRule struct {
+	OverTokens int    `json:"over_tokens"`
+	To         string `json:"to"`
 }
 
 // Default 默认配置。

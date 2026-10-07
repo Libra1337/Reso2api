@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/config"
 	"wild-work/internal/pgstore"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
@@ -61,11 +62,13 @@ type Config struct {
 	PGStore *pgstore.Store
 	// MaskUpstream 上游特征掩码（默认开）：models 去渠道前缀 / 错误报文中性化
 	MaskUpstream *bool
-	HardCooldown         time.Duration
-	SoftCooldown         time.Duration
-	ErrThreshold         int
-	ErrCooldown          time.Duration
-	RefreshSkew          time.Duration
+	// Routing 溢流路由（超大上下文改发缓存稳定模型，见 config.Routing）
+	Routing      config.Routing
+	HardCooldown time.Duration
+	SoftCooldown time.Duration
+	ErrThreshold int
+	ErrCooldown  time.Duration
+	RefreshSkew  time.Duration
 }
 
 // stickyEntry 粘性路由记录：记录上次路由账号及连续使用次数。
@@ -80,8 +83,8 @@ type stickyEntry struct {
 
 // 会话级粘性的淘汰参数：空闲超时 + 条目上限（插入新条目时顺带清扫）。
 const (
-	stickyIdleTTL     = 2 * time.Hour
-	stickyMaxEntries  = 4096
+	stickyIdleTTL    = 2 * time.Hour
+	stickyMaxEntries = 4096
 )
 
 // Handler 主路由。
@@ -89,11 +92,16 @@ type Handler struct {
 	cfg Config
 	mux *http.ServeMux
 
-	apiMu       sync.RWMutex // 保护 cfg.APIKey（面板可运行时修改）
+	apiMu        sync.RWMutex // 保护 cfg.APIKey（面板可运行时修改）
 	maskUpstream bool
-	stickyMu sync.RWMutex
-	sticky   map[string]*stickyEntry // stickyKey(kind, 会话指纹) → stickyEntry
-	reqLogs  reqLogStore             // 请求级日志（环形）
+
+	// sessInMu/sessLastIn 会话 → 上一轮真实 in_tokens（溢流路由判定用；
+	// 首轮无记录时按 body 字节估算）。与 sticky 同规格淘汰。
+	sessInMu   sync.Mutex
+	sessLastIn map[string]int64
+	stickyMu   sync.RWMutex
+	sticky     map[string]*stickyEntry // stickyKey(kind, 会话指纹) → stickyEntry
+	reqLogs    reqLogStore             // 请求级日志（环形）
 }
 
 func NewHandler(cfg Config) *Handler {
@@ -124,7 +132,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.MaskUpstream != nil {
 		maskUpstream = *cfg.MaskUpstream
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), maskUpstream: maskUpstream}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), maskUpstream: maskUpstream, sessLastIn: make(map[string]int64)}
 	h.reqLogs.path = cfg.RequestLogPath
 	h.reqLogs.legacy = cfg.RequestLogLegacyPath
 	if cfg.PGStore != nil {
@@ -592,7 +600,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		hb = startSSEHeartbeat(w, openAIErrFrame)
 		dw = hb
 	}
-	rc, uid, ok := h.dispatchChat(rt, t0, requestedModel, body, dw)
+	session := upstream.ConversationFingerprint(body)
+	rc, uid, ok := h.dispatchChat(rt, t0, requestedModel, body, dw, session)
 	if hb != nil {
 		w = hb.Stop()
 	}
@@ -643,6 +652,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		h.finishReqLogFile(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, true, fbw.ttfb(), tee.snapshot(), bodyFile)
+		if u := tee.snapshot(); u != nil {
+			h.noteSessionIn(session, num(u["prompt_tokens"]))
+		}
 		h.noteQuality(rt, uid, tee)
 		_ = err
 		return
@@ -657,6 +669,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	usage, _ := resp["usage"].(map[string]any)
 	h.finishReqLogFile(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, false, 0, usage, bodyFile)
+	h.noteSessionIn(session, num(usage["prompt_tokens"]))
 	h.noteQualityMap(rt, uid, usage, respToolCalled(resp))
 	if h.maskUpstream {
 		maskAggregateResp(resp, displayNameFor(requestedModel))
@@ -781,15 +794,16 @@ func wrapThinkTag(resp map[string]any) {
 // dispatchChat 选号（粘性/刷新/换号重试）并打开上游流。
 // 失败路径自行把错误响应写入 w 并返回 ok=false；
 // 成功返回需调用方 Close 的 rc 与命中账号 uid。
-func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []byte, w http.ResponseWriter) (io.ReadCloser, string, bool) {
+func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []byte, w http.ResponseWriter, session string) (io.ReadCloser, string, bool) {
 	tried := map[string]bool{}
 	var lastErr error
 	var lastStatus int
 	var lastBody []byte                   // 最后一次上游错误（轮转耗尽时按原状态透传）
 	routeModel := extractModel(body)      // 出站裸模型名（6004 模型级冷却按它画界）
 	convID := extractConversationID(body) // 会话标识：prompt_cache_key 注入源
-	// 会话指纹：粘性路由按它分组（与缓存键会话源同优先级），换号只冷一个会话。
-	session := upstream.ConversationFingerprint(body)
+	// 超大上下文溢流路由（routing.overflow）：flash 类大上下文缓存淘汰快，
+	// 超阈值改发缓存稳定的指定模型（响应仍回显请求名）。
+	body, routeModel, model = h.applyOverflow(body, routeModel, model, session)
 	// 全池模型冷却快速失败：所有健康账号都被 6004 冷却时，轮转必然空转
 	// （每号一次上游 429 往返，实测一圈 600s+）。立即以 429 回绝并带最早
 	// 重置时刻，让客户端显式重试而非长时间挂死后断连。
@@ -986,6 +1000,48 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
 	h.finishReqLog(t0, model, rt.Kind.String(), "", http.StatusServiceUnavailable, false, 0, nil, body)
 	return nil, "", false
+}
+
+// applyOverflow 超大上下文溢流：命中规则（上一轮真实 in_tokens 或首轮字节
+// 估算 ~2.6B/token 超过 over_tokens）时改写 body 的 model 字段并返回目标模型。
+// 返回值：(body, 出站模型, 展示模型)。未命中规则原样返回。
+func (h *Handler) applyOverflow(body []byte, routeModel, displayModel, session string) ([]byte, string, string) {
+	rule, ok := h.cfg.Routing.Overflow[displayModel]
+	if !ok || rule.OverTokens <= 0 || rule.To == "" || rule.To == routeModel {
+		return body, routeModel, displayModel
+	}
+	last := int64(0)
+	if session != "" {
+		h.sessInMu.Lock()
+		last = h.sessLastIn[session]
+		h.sessInMu.Unlock()
+	}
+	est := int64(float64(len(body)) / 2.6)
+	if last < est {
+		last = est
+	}
+	if last <= int64(rule.OverTokens) {
+		return body, routeModel, displayModel
+	}
+	nb, err := rewriteModel(body, rule.To)
+	if err != nil {
+		return body, routeModel, displayModel
+	}
+	log.Printf("overflow route %s -> %s (last_in=%d threshold=%d session=%.16s)", displayModel, rule.To, last, rule.OverTokens, session)
+	return nb, rule.To, displayModel
+}
+
+// noteSessionIn 记录会话上一轮真实 in_tokens（溢流判定；容量与 sticky 同规格）。
+func (h *Handler) noteSessionIn(session string, inTokens int64) {
+	if session == "" || inTokens <= 0 {
+		return
+	}
+	h.sessInMu.Lock()
+	defer h.sessInMu.Unlock()
+	if len(h.sessLastIn) >= 4096 {
+		h.sessLastIn = make(map[string]int64)
+	}
+	h.sessLastIn[session] = inTokens
 }
 
 // modelAliases 客户端生态已知官方名 → 网关实际模型名。部分客户端（如

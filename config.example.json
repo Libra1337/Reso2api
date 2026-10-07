@@ -1,4 +1,12 @@
 {
+  "routing": {
+    "overflow": {
+      "glm-5.3-flash": {
+        "over_tokens": 230000,
+        "to": "glm-5.3"
+      }
+    }
+  },
   "listen": {
     "host": "127.0.0.1",
     "port": 7863

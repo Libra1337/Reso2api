@@ -1,7 +1,7 @@
 // maskwriter.go 响应侧上游特征掩码（features.mask_upstream，默认开）。
 //
 // 目标不是"中性 OpenAI"，而是**按模型家族模仿各家官方 API 的响应指纹**
-//（2026-10-07 官方 DeepSeek API 实测定稿）：
+// （2026-10-07 官方 DeepSeek API 实测定稿）：
 //
 //	deepseek 家族（实测 api.deepseek.com）：
 //	  id=纯 UUID（无 chatcmpl- 前缀）、model=官方名（deepseek-v4.1-flash →

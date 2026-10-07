@@ -11,9 +11,10 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/config"
 	"wild-work/internal/pool"
-	"wild-work/internal/upstream"
 	"wild-work/internal/provider"
+	"wild-work/internal/upstream"
 )
 
 type rotateUpstream struct {
@@ -81,7 +82,7 @@ func TestDispatchChatRotatesOnModelRateLimit(t *testing.T) {
 	body := []byte(`{"model":"glm-5.3","messages":[{"role":"user","content":"hi"}]}`)
 	h.sticky[h.stickyKey(rt.Kind, upstream.ConversationFingerprint(body))] = &stickyEntry{uid: "u1", maxReqs: 50, lastUsed: time.Now()}
 	rec := httptest.NewRecorder()
-	rc, uid, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", body, rec)
+	rc, uid, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", body, rec, "")
 	if !ok {
 		t.Fatalf("dispatch failed status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -179,7 +180,7 @@ func TestStickyIsPerConversation(t *testing.T) {
 	// A 的粘性账号 u1 被 6004 限流 → A 换到别的号
 	up.limit["u1"] = true
 	rec := httptest.NewRecorder()
-	rc, uidA, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", convA, rec)
+	rc, uidA, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", convA, rec, "")
 	if !ok {
 		t.Fatalf("convA failed status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -190,7 +191,7 @@ func TestStickyIsPerConversation(t *testing.T) {
 
 	// B 的粘性必须不受影响：仍走 u2
 	rec = httptest.NewRecorder()
-	rc, uidB, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", convB, rec)
+	rc, uidB, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", convB, rec, "")
 	if !ok {
 		t.Fatalf("convB failed status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -213,7 +214,7 @@ func TestContentBlockKeepsSticky(t *testing.T) {
 	h.sticky[key] = &stickyEntry{uid: "u1", maxReqs: 50, lastUsed: time.Now()}
 
 	rec := httptest.NewRecorder()
-	if _, _, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", conv, rec); ok {
+	if _, _, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", conv, rec, ""); ok {
 		t.Fatal("content block should fail dispatch")
 	}
 	if rec.Code != http.StatusBadRequest {
@@ -317,7 +318,7 @@ func TestSSEMaskWriterFamilies(t *testing.T) {
 		t.Fatalf("deepseek must echo official name:\n%s", out)
 	}
 	var chunk struct {
-		ID   string         `json:"id"`
+		ID    string         `json:"id"`
 		Usage map[string]any `json:"usage"`
 	}
 	for _, line := range strings.Split(out, "\n") {
@@ -382,5 +383,36 @@ func TestMaskAggregateResp(t *testing.T) {
 	}
 	if u["prompt_cache_hit_tokens"] != float64(8) {
 		t.Fatalf("hit=%v", u["prompt_cache_hit_tokens"])
+	}
+}
+
+// 溢流路由：上一轮真实 in_tokens 超阈值 → body 改发目标模型；未超/无规则不变。
+func TestApplyOverflow(t *testing.T) {
+	h := NewHandler(Config{Pool: pool.New(""), Upstream: &rotateUpstream{}, MaxRotate: 5,
+		Routing: config.Routing{Overflow: map[string]config.OverflowRule{
+			"glm-5.3-flash": {OverTokens: 230000, To: "glm-5.3"},
+		}}})
+	body := []byte(`{"model":"glm-5.3-flash","messages":[{"role":"user","content":"hi"}],"prompt_cache_key":"s1"}`)
+
+	// 首轮：字节估算远小于阈值 → 不改
+	nb, m, d := h.applyOverflow(body, "glm-5.3-flash", "glm-5.3-flash", "pk:s1")
+	if m != "glm-5.3-flash" || string(nb) != string(body) || d != "glm-5.3-flash" {
+		t.Fatalf("small ctx must pass through: m=%s", m)
+	}
+
+	// 记录上一轮 300k → 溢流
+	h.noteSessionIn("pk:s1", 300000)
+	nb, m, d = h.applyOverflow(body, "glm-5.3-flash", "glm-5.3-flash", "pk:s1")
+	if m != "glm-5.3" || d != "glm-5.3-flash" {
+		t.Fatalf("overflow must route to glm-5.3, got m=%s d=%s", m, d)
+	}
+	if !strings.Contains(string(nb), `"model":"glm-5.3"`) {
+		t.Fatalf("body model not rewritten: %s", nb)
+	}
+
+	// 无规则的模型不受影响（body 原样）
+	nb, m, _ = h.applyOverflow(body, "glm-5.2", "glm-5.2", "pk:s1")
+	if m != "glm-5.2" || string(nb) != string(body) {
+		t.Fatal("no-rule model must be untouched")
 	}
 }

@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"wild-work/internal/upstream"
 )
 
 // respInputItem Responses input 数组元素（宽松解析，未知类型跳过）。
@@ -629,7 +631,7 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		hb = startSSEHeartbeat(w, responsesErrFrame)
 		dw = hb
 	}
-	rc, uid, ok := h.dispatchChat(rt, t0, model, chatBody, dw)
+	rc, uid, ok := h.dispatchChat(rt, t0, model, chatBody, dw, upstream.ConversationFingerprint(chatBody))
 	if hb != nil {
 		w = hb.Stop()
 	}
