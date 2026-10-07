@@ -605,6 +605,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			ttw = newThinkTagWriter(fbw)
 			out = ttw
 		}
+		// 响应指纹掩码（最外层）：id→chatcmpl-、model→请求展示名、
+		// usage 剥非标字段（credit/prompt_cache_* 等）。面板统计走 tee，先于掩码。
+		if h.maskUpstream {
+			mw := newSSEMaskWriter(out, displayNameFor(requestedModel))
+			out = mw
+		}
 		err := rt.Upstream.Stream(out, &teeReadCloser{rc: rc, w: tee})
 		if ttw != nil {
 			ttw.Finish()
@@ -636,6 +642,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	usage, _ := resp["usage"].(map[string]any)
 	h.finishReqLogFile(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, false, 0, usage, bodyFile)
 	h.noteQualityMap(rt, uid, usage, respToolCalled(resp))
+	if h.maskUpstream {
+		maskAggregateResp(resp, displayNameFor(requestedModel))
+	}
 	writeJSON(fbw, http.StatusOK, resp)
 }
 
