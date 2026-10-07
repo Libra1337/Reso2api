@@ -263,6 +263,7 @@ func main() {
 		WebUI:                sub,
 		AttachAPI:            appInst.HandleAPI,
 		PGStore:              pgDB,
+		MaskUpstream:         cfg.Features.MaskUpstream,
 	})
 	appInst.SetHandler(h)
 	defer h.Close() // 关闭请求日志 journal 句柄 / PG 写入队列 flush

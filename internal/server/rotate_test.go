@@ -226,3 +226,68 @@ func TestContentBlockKeepsSticky(t *testing.T) {
 		t.Fatalf("sticky=%v want u1 retained (client-side error must not clear sticky)", e)
 	}
 }
+
+// 上游特征掩码：模型列表不暴露渠道前缀 / owned_by；带前缀旧名仍可路由。
+func TestModelListMasked(t *testing.T) {
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "t1", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	h := NewHandler(Config{Pool: p, Upstream: &rotateUpstream{}, MaxRotate: 5})
+	list := h.modelList()
+	if len(list) == 0 {
+		t.Fatal("empty model list")
+	}
+	for _, m := range list {
+		id, _ := m["id"].(string)
+		if strings.Contains(id, "workbuddy/") || strings.Contains(id, "traework/") || strings.Contains(id, "qoder/") {
+			t.Fatalf("masked list must not expose channel prefix: %q", id)
+		}
+		if ob, _ := m["owned_by"].(string); ob == "workbuddy" {
+			t.Fatalf("owned_by must be neutral, got %q", ob)
+		}
+	}
+	// 掩码关闭时恢复前缀
+	h2 := NewHandler(Config{Pool: p, Upstream: &rotateUpstream{}, MaxRotate: 5})
+	off := false
+	h2.maskUpstream = off
+	_ = off
+	found := false
+	for _, m := range h2.modelList() {
+		if id, _ := m["id"].(string); strings.HasPrefix(id, "workbuddy/") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("mask off must expose channel-prefixed ids")
+	}
+}
+
+// 上游错误报文掩码：客户端拿到中性 OpenAI 错误，不含上游 code/文案。
+func TestUpstreamErrorMasked(t *testing.T) {
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "t1", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	up := &paramErrUpstream{}
+	h := NewHandler(Config{Pool: p, Upstream: up, MaxRotate: 5})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"workbuddy/glm-5.3","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+	))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "11133") || strings.Contains(body, "codebuddy") || strings.Contains(body, "WorkBuddy") {
+		t.Fatalf("upstream identity leaked: %s", body)
+	}
+	if !strings.Contains(body, `"api_error"`) {
+		t.Fatalf("want neutral OpenAI error, got: %s", body)
+	}
+}
+
+type paramErrUpstream struct{ rotateUpstream }
+
+func (u *paramErrUpstream) ChatStream(*auth.Auth, []byte) (io.ReadCloser, int, []byte, error) {
+	return nil, http.StatusBadRequest,
+		[]byte(`{"code":11133,"msg":"invalid params by www.codebuddy.cn","requestId":"wb-xyz"}`), nil
+}

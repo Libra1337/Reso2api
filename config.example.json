@@ -39,7 +39,8 @@
     "judge_base_url": "",
     "judge_api_key": "",
     "judge_model": "",
-    "judge_timeout_ms": 4000
+    "judge_timeout_ms": 4000,
+    "mask_upstream": true
   },
   "prompt": {
     "mode": "passthrough",

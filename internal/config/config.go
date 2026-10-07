@@ -133,6 +133,10 @@ type Config struct {
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
 		// ContentFirewall 内容防火墙（默认开启）：关键词命中后交外部审查判定。
 		ContentFirewall *bool `json:"content_firewall,omitempty"`
+		// MaskUpstream 上游特征掩码（默认开启）：/v1/models 去渠道前缀、
+		// owned_by 中性化、上游错误报文包装为中性 OpenAI 形（原文写日志）。
+		// 对外不暴露 workbuddy/traework 等渠道身份；带前缀的旧模型名仍可调用。
+		MaskUpstream *bool `json:"mask_upstream,omitempty"`
 		// JudgeEnabled 外部 LLM 审查。未启用或未配齐时关键词命中也放行（fail-open）。
 		JudgeEnabled   bool   `json:"judge_enabled,omitempty"`
 		JudgeBaseURL   string `json:"judge_base_url,omitempty"`
@@ -183,6 +187,8 @@ func Default() *Config {
 	c.Schedule.KeepaliveHours = []int{22}
 	c.Upstream.TimeoutSeconds = 120
 	c.Features.SanitizeBlacklistFingerprints = true
+	maskOn := true
+	c.Features.MaskUpstream = &maskOn
 	fwOn := true
 	c.Features.ContentFirewall = &fwOn
 	c.Prompt.Mode = "passthrough"

@@ -59,6 +59,8 @@ type Config struct {
 	// PGStore PostgreSQL 存储模式（storage.mode=postgres）；非 nil 时请求日志
 	// 走 PG（jsonl 停写，历史由 cmd/reqlog-import 一次性导入）
 	PGStore *pgstore.Store
+	// MaskUpstream 上游特征掩码（默认开）：models 去渠道前缀 / 错误报文中性化
+	MaskUpstream *bool
 	HardCooldown         time.Duration
 	SoftCooldown         time.Duration
 	ErrThreshold         int
@@ -87,7 +89,8 @@ type Handler struct {
 	cfg Config
 	mux *http.ServeMux
 
-	apiMu    sync.RWMutex // 保护 cfg.APIKey（面板可运行时修改）
+	apiMu       sync.RWMutex // 保护 cfg.APIKey（面板可运行时修改）
+	maskUpstream bool
 	stickyMu sync.RWMutex
 	sticky   map[string]*stickyEntry // stickyKey(kind, 会话指纹) → stickyEntry
 	reqLogs  reqLogStore             // 请求级日志（环形）
@@ -117,7 +120,11 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry)}
+	maskUpstream := true
+	if cfg.MaskUpstream != nil {
+		maskUpstream = *cfg.MaskUpstream
+	}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), maskUpstream: maskUpstream}
 	h.reqLogs.path = cfg.RequestLogPath
 	h.reqLogs.legacy = cfg.RequestLogLegacyPath
 	if cfg.PGStore != nil {
@@ -366,7 +373,16 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		for _, mi := range infos {
 			id := k.String() + "/" + mi.ID
-			entry := map[string]any{"id": id, "object": "model", "created": 1753600000, "owned_by": k.String()}
+			ownedBy := k.String()
+			// 上游特征掩码：对外去渠道前缀、owned_by 中性化（渠道身份不外露）。
+			// 路由层不变：带前缀的旧模型名仍可调用（runtimeForModel 兼容两种）。
+			if h.maskUpstream {
+				if _, bare, ok := strings.Cut(id, "/"); ok {
+					id = bare
+				}
+				ownedBy = "system"
+			}
+			entry := map[string]any{"id": id, "object": "model", "created": 1753600000, "owned_by": ownedBy}
 			if mi.ContextWindow > 0 {
 				entry["context_length"] = mi.ContextWindow
 			}
@@ -862,6 +878,12 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 				}
 				out := respBody
 				outStatus := status
+				if h.maskUpstream && !upstream.IsContentPolicyBlock(string(respBody)) {
+					// 上游特征掩码：原始报文写日志（排障），对外发中性 OpenAI 错误
+					log.Printf("upstream error passthrough masked platform=%s uid=%s status=%d body=%.400s",
+						rt.Kind, acct.UID, status, respBody)
+					out = maskUpstreamErrorBody(status, model)
+				}
 				if upstream.IsContentPolicyBlock(string(respBody)) {
 					// 内容审核：回网关防火墙文案，不透传上游 body（账号/业务 code）。
 					// 状态码用 400 不用 403：monoize 类中转把 403 当渠道永久故障，
@@ -918,6 +940,10 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 	if lastBody != nil {
 		out := lastBody
 		outStatus := lastStatus
+		if h.maskUpstream && !upstream.IsContentPolicyBlock(string(lastBody)) {
+			log.Printf("upstream error passthrough masked (rotate-exhausted) status=%d body=%.400s", lastStatus, lastBody)
+			out = maskUpstreamErrorBody(lastStatus, model)
+		}
 		if upstream.IsContentPolicyBlock(string(lastBody)) {
 			out = upstream.FirewallHitResponse(upstream.ContentBlockKeyword(string(lastBody)))
 			outStatus = http.StatusBadRequest
@@ -1126,4 +1152,23 @@ func WorkBuddyStaticModels() []provider.ModelInfo {
 }
 func TraeWorkStaticModels() []provider.ModelInfo {
 	return append([]provider.ModelInfo{}, traeworkStaticModels...)
+}
+
+// maskUpstreamErrorBody 生成中性 OpenAI 错误报文（不含上游 code/文案/品牌）。
+// 掩码模式下替代上游原始 4xx/5xx body 出站；原文由调用方写日志。
+func maskUpstreamErrorBody(status int, model string) []byte {
+	typ := "api_error"
+	if status == http.StatusTooManyRequests {
+		typ = "rate_limit_error"
+	} else if status >= 500 {
+		typ = "server_error"
+	}
+	msg := fmt.Sprintf("upstream service error (http %d)", status)
+	if model != "" {
+		msg += " for model " + model
+	}
+	body, _ := json.Marshal(map[string]any{
+		"error": map[string]any{"message": msg, "type": typ, "code": status},
+	})
+	return body
 }
