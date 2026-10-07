@@ -406,9 +406,13 @@ func (h *Handler) modelList() []map[string]any {
 			}
 			entry := map[string]any{"id": id, "object": "model", "created": 1753600000, "owned_by": ownedBy}
 			if h.maskUpstream && ownedBy == "deepseek" {
-				// 官方 /models 条目形态：name + context_window/max_output_tokens 键名
+				// 官方 /models 条目形态（实测）：name + context_window/max_output_tokens
 				entry["name"] = strings.ToUpper(strings.ReplaceAll(id, "-", " "))
 				delete(entry, "created")
+				if v, ok := entry["context_length"]; ok {
+					entry["context_window"] = v
+					delete(entry, "context_length")
+				}
 			}
 			if mi.ContextWindow > 0 {
 				entry["context_length"] = mi.ContextWindow
