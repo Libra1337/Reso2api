@@ -409,10 +409,6 @@ func (h *Handler) modelList() []map[string]any {
 				// 官方 /models 条目形态（实测）：name + context_window/max_output_tokens
 				entry["name"] = strings.ToUpper(strings.ReplaceAll(id, "-", " "))
 				delete(entry, "created")
-				if v, ok := entry["context_length"]; ok {
-					entry["context_window"] = v
-					delete(entry, "context_length")
-				}
 			}
 			if mi.ContextWindow > 0 {
 				entry["context_length"] = mi.ContextWindow
@@ -425,6 +421,13 @@ func (h *Handler) modelList() []map[string]any {
 				// {id, object, created, owned_by}——须在补录 context/max 之后删
 				delete(entry, "context_length")
 				delete(entry, "max_output_tokens")
+			}
+			if h.maskUpstream && ownedBy == "deepseek" {
+				// 官方键名 context_window（实测）——同样须在补录之后改名
+				if v, ok := entry["context_length"]; ok {
+					entry["context_window"] = v
+					delete(entry, "context_length")
+				}
 			}
 			out = append(out, entry)
 			if v, ok := thinkVariant(entry); ok {
