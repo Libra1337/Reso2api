@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -529,7 +530,13 @@ func (h *Handler) responsesRelay(w http.ResponseWriter, rc io.ReadCloser, model 
 	if !stream {
 		// 非流式：聚合为单个 response JSON；截断时报错让客户端重试
 		if truncated {
-			writeResponsesError(w, http.StatusBadGateway, "upstream stream ended before completion")
+			if h.maskUpstream {
+				// 官方措辞：截断原因只进日志
+				log.Printf("responses truncated (non-stream) masked model=%s scanErr=%v sawFinish=%v", model, scanner.Err(), sawFinish)
+				writeResponsesError(w, http.StatusBadGateway, "The server had an error while processing your request. Sorry about that!")
+			} else {
+				writeResponsesError(w, http.StatusBadGateway, "upstream stream ended before completion")
+			}
 			return usage, 0
 		}
 		writeJSONRaw(w, http.StatusOK, respEnvelope("completed", output))
@@ -580,8 +587,14 @@ func (h *Handler) responsesRelay(w http.ResponseWriter, rc io.ReadCloser, model 
 	if truncated {
 		// 流式截断：先收尾已开的项目，再以 failed 终止（客户端可感知并重试）
 		env := respEnvelope("failed", output)
+		errCode, errMsg := "upstream_stream_ended", "upstream stream ended before completion"
+		if h.maskUpstream {
+			// 官方措辞：截断原因只进日志
+			log.Printf("responses truncated (stream) masked model=%s scanErr=%v sawFinish=%v", model, scanner.Err(), sawFinish)
+			errCode, errMsg = "server_error", "The server had an error while processing your request. Sorry about that!"
+		}
 		env["error"] = map[string]any{
-			"code": "upstream_stream_ended", "message": "upstream stream ended before completion",
+			"code": errCode, "message": errMsg,
 		}
 		emit("response.failed", map[string]any{"response": env})
 		return usage, ttfb

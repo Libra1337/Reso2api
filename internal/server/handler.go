@@ -664,7 +664,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 而非静默 EOF；仅在上游未发过 finish/[DONE] 时补（正常收尾不重复）。
 		if err != nil && !tee.sawDone() {
 			log.Printf("stream interrupted mid-flight platform=%s uid=%s model=%s err=%v (sending error frame)", rt.Kind, uid, requestedModel, err)
-			errFrame := "data: {\"error\":{\"message\":\"upstream stream interrupted: " + strings.ReplaceAll(err.Error(), "\"", "'") + "\",\"type\":\"api_error\"}}\n\ndata: [DONE]\n\n"
+			msg, typ := "upstream stream interrupted: "+strings.ReplaceAll(err.Error(), "\"", "'"), "api_error"
+			if h.maskUpstream {
+				// 官方措辞：原始 err 带上游传输细节（dial tcp/上游域名），只进日志
+				msg, typ = "The server had an error while processing your request. Sorry about that!", "server_error"
+			}
+			errFrame := "data: {\"error\":{\"message\":\"" + msg + "\",\"type\":\"" + typ + "\"}}\n\ndata: [DONE]\n\n"
 			_, _ = io.WriteString(out, errFrame)
 			if fl, ok := out.(http.Flusher); ok {
 				fl.Flush()
@@ -683,7 +688,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := rt.Upstream.Aggregate(rc)
 	if err != nil {
-		writeOpenAIError(fbw, http.StatusBadGateway, "upstream_parse", err.Error())
+		if h.maskUpstream {
+			// 官方措辞：Aggregate 错误含上游响应细节，只进日志
+			log.Printf("aggregate error masked platform=%s uid=%s model=%s err=%v", rt.Kind, uid, requestedModel, err)
+			writeOpenAIError(fbw, http.StatusBadGateway, "server_error", "The server had an error while processing your request. Sorry about that!")
+		} else {
+			writeOpenAIError(fbw, http.StatusBadGateway, "upstream_parse", err.Error())
+		}
 		return
 	}
 	if thinkTag {
@@ -1285,14 +1296,15 @@ func TraeWorkStaticModels() []provider.ModelInfo {
 // 掩码模式下替代上游原始 4xx/5xx body 出站；原文由调用方写日志。
 func maskUpstreamErrorBody(status int, model string) []byte {
 	typ := "api_error"
+	msg := "The server had an error while processing your request. Sorry about that!"
 	if status == http.StatusTooManyRequests {
 		typ = "rate_limit_error"
+		msg = "Rate limit reached for requests. Please try again later."
+		if model != "" {
+			msg = "Rate limit reached for model " + model + ". Please try again later."
+		}
 	} else if status >= 500 {
 		typ = "server_error"
-	}
-	msg := fmt.Sprintf("upstream service error (http %d)", status)
-	if model != "" {
-		msg += " for model " + model
 	}
 	body, _ := json.Marshal(map[string]any{
 		"error": map[string]any{"message": msg, "type": typ, "code": status},

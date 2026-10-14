@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -489,4 +490,36 @@ func (u *keepaliveFakeUpstream) ChatStream(a *auth.Auth, body []byte) (io.ReadCl
 	_ = json.Unmarshal(body, &obj)
 	u.model, u.maxTokens, u.uid = obj.Model, obj.MaxTokens, a.UID
 	return io.NopCloser(strings.NewReader("data: [DONE]\n\n")), http.StatusOK, nil, nil
+}
+
+// 流中断补错帧必须官方化：原始 err（dial tcp/上游域名/upstream 字样）只进日志，线上无痕。
+func TestStreamInterruptFrameMasked(t *testing.T) {
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "t1", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	up := &interruptUpstream{}
+	h := NewHandler(Config{Pool: p, Upstream: up, MaxRotate: 5})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"workbuddy/glm-5.3","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+	))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	for _, leak := range []string{"upstream", "copilot.tencent", "codebuddy", "dial tcp", "no such host", "interrupted"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("interrupt frame leak %q:\n%s", leak, body)
+		}
+	}
+	if !strings.Contains(body, `"server_error"`) || !strings.Contains(body, "The server had an error while processing your request") {
+		t.Fatalf("want official wording, got:\n%s", body)
+	}
+}
+
+type interruptUpstream struct{ rotateUpstream }
+
+func (u *interruptUpstream) Stream(w http.ResponseWriter, _ io.Reader) error {
+	_, _ = io.WriteString(w, "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n")
+	if fl, ok := w.(http.Flusher); ok {
+		fl.Flush()
+	}
+	return errors.New("read tcp 10.0.0.9:443->1.2.3.4: dial tcp: lookup chrome-gw.codebuddy.cn: no such host (upstream stream interrupted)")
 }

@@ -305,7 +305,8 @@ func extractMessageText(body []byte) string {
 
 // firewallClientMsg 返回给调用方 / 中转站的固定文案。
 // [关键词] 填分类词（色情 / nsfw / 暴恐 等），绝不填内部规则名、业务 code、账号。
-const firewallClientMsg = "触发网站风控违禁词，无法调用模型：内容命中网关内容防火墙规则[%s]，已被拦截。请修改内容后重试。"
+// 措辞对齐官方内容审核风格（"内容安全策略"），不自称网关/中转/风控系统。
+const firewallClientMsg = "您的请求已触发内容安全策略，无法完成响应：内容命中[%s]类风险，已被拦截。请修改相关内容后重试。"
 
 const firewallFallbackKeyword = "违禁词"
 

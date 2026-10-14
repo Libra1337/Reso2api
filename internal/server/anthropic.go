@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -309,7 +310,13 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := rt.Upstream.Aggregate(rc)
 	if err != nil {
-		anthropicError(fbw, http.StatusBadGateway, "api_error", err.Error())
+		if h.maskUpstream {
+			// 官方措辞：Aggregate 错误含上游响应细节，只进日志
+			log.Printf("anthropic aggregate error masked platform=%s uid=%s model=%s err=%v", rt.Kind, uid, peek.Model, err)
+			anthropicError(fbw, http.StatusBadGateway, "api_error", "The server had an error while processing your request.")
+		} else {
+			anthropicError(fbw, http.StatusBadGateway, "api_error", err.Error())
+		}
 		return
 	}
 	usage, _ := resp["usage"].(map[string]any)
@@ -568,12 +575,17 @@ func anthropicRelay(w http.ResponseWriter, rc io.ReadCloser, model string) map[s
 		curKind = ""
 	}
 	if truncated {
-		reason := "upstream stream ended before completion"
+		reason, typ := "upstream stream ended before completion", "upstream_error"
 		if sc.Err() != nil {
 			reason = "upstream stream aborted: " + sc.Err().Error()
 		}
+		if maskUpstreamDefault {
+			// 官方措辞：截断原因（看门狗/传输错误原文）只进日志
+			log.Printf("anthropic stream truncated masked err=%v", sc.Err())
+			reason, typ = "The server had an error while processing your request.", "api_error"
+		}
 		emit("error", map[string]any{
-			"error": map[string]any{"type": "upstream_error", "message": reason},
+			"error": map[string]any{"type": typ, "message": reason},
 		})
 	}
 	u := anthropicUsage(usage)

@@ -186,7 +186,7 @@ func TestFirewallHitResponseUsesKeywordNotRuleName(t *testing.T) {
 		if err := json.Unmarshal(raw, &env); err != nil {
 			t.Fatalf("rule=%q not json: %v body=%s", c.in, err, raw)
 		}
-		want := "触发网站风控违禁词，无法调用模型：内容命中网关内容防火墙规则[" + c.want + "]，已被拦截。请修改内容后重试。"
+		want := "您的请求已触发内容安全策略，无法完成响应：内容命中[" + c.want + "]类风险，已被拦截。请修改相关内容后重试。"
 		if env.Error.Message != want {
 			t.Errorf("rule=%q message=%q want %q", c.in, env.Error.Message, want)
 		}
