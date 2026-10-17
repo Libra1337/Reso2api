@@ -523,3 +523,32 @@ func (u *interruptUpstream) Stream(w http.ResponseWriter, _ io.Reader) error {
 	}
 	return errors.New("read tcp 10.0.0.9:443->1.2.3.4: dial tcp: lookup chrome-gw.codebuddy.cn: no such host (upstream stream interrupted)")
 }
+
+// 上下文超长（11115）必须翻译成官方 context_length_exceeded 同款文案：
+// 笼统化会让下游当服务器故障无限重试（2026-10-17 实测一会话 15 连击）。
+func TestMaskContextLengthExceeded(t *testing.T) {
+	wb := []byte(`{"code":11115,"msg":"prompt is too long: 1495018 tokens > 1048576 maximum","requestId":"77662510"}`)
+	out := string(maskUpstreamErrorBody(http.StatusBadRequest, "deepseek-v4.1-flash", wb))
+	for _, want := range []string{"context_length_exceeded", "invalid_request_error", "1048576", "1495018"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("workbuddy form missing %q:\n%s", want, out)
+		}
+	}
+	for _, leak := range []string{"11115", "workbuddy", "requestId"} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("context-length mask leak %q:\n%s", leak, out)
+		}
+	}
+	// 官方形（数字顺序相反）："maximum context length is M ... N"
+	official := []byte(`{"error":{"message":"This model's maximum context length is 131072 tokens. However, your messages resulted in 150000 tokens.","type":"invalid_request_error"}}`)
+	out2 := string(maskUpstreamErrorBody(http.StatusBadRequest, "", official))
+	if !strings.Contains(out2, "131072 tokens. However, your messages resulted in 150000") {
+		t.Fatalf("official form direction wrong:\n%s", out2)
+	}
+	// 非超长 400：保持笼统掩码
+	other := []byte(`{"code":11133,"msg":"invalid params by www.codebuddy.cn"}`)
+	out3 := string(maskUpstreamErrorBody(http.StatusBadRequest, "", other))
+	if strings.Contains(out3, "context_length_exceeded") || strings.Contains(out3, "codebuddy") {
+		t.Fatalf("non-context 400 should stay generic masked:\n%s", out3)
+	}
+}

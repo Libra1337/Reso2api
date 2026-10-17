@@ -12,7 +12,9 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -958,14 +960,14 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 						log.Printf("content-block circuit breaker: disable platform=%s uid=%s (11140 x3/h)", rt.Kind, acct.UID)
 					}
 				}
-				out := respBody
-				outStatus := status
-				if h.maskUpstream && !upstream.IsContentPolicyBlock(string(respBody)) {
-					// 上游特征掩码：原始报文写日志（排障），对外发中性 OpenAI 错误
-					log.Printf("upstream error passthrough masked platform=%s uid=%s status=%d body=%.400s",
-						rt.Kind, acct.UID, status, respBody)
-					out = maskUpstreamErrorBody(status, model)
-				}
+			out := respBody
+			outStatus := status
+			if h.maskUpstream && !upstream.IsContentPolicyBlock(string(respBody)) {
+				// 上游特征掩码：原始报文写日志（排障），对外发中性 OpenAI 错误
+				log.Printf("upstream error passthrough masked platform=%s uid=%s status=%d body=%.400s",
+					rt.Kind, acct.UID, status, respBody)
+				out = maskUpstreamErrorBody(status, model, respBody)
+			}
 				if upstream.IsContentPolicyBlock(string(respBody)) {
 					// 内容审核：回网关防火墙文案，不透传上游 body（账号/业务 code）。
 					// 状态码用 400 不用 403：monoize 类中转把 403 当渠道永久故障，
@@ -1024,7 +1026,7 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		outStatus := lastStatus
 		if h.maskUpstream && !upstream.IsContentPolicyBlock(string(lastBody)) {
 			log.Printf("upstream error passthrough masked (rotate-exhausted) status=%d body=%.400s", lastStatus, lastBody)
-			out = maskUpstreamErrorBody(lastStatus, model)
+			out = maskUpstreamErrorBody(lastStatus, model, lastBody)
 		}
 		if upstream.IsContentPolicyBlock(string(lastBody)) {
 			out = upstream.FirewallHitResponse(upstream.ContentBlockKeyword(string(lastBody)))
@@ -1294,8 +1296,13 @@ func TraeWorkStaticModels() []provider.ModelInfo {
 
 // maskUpstreamErrorBody 生成中性 OpenAI 错误报文（不含上游 code/文案/品牌）。
 // 掩码模式下替代上游原始 4xx/5xx body 出站；原文由调用方写日志。
-func maskUpstreamErrorBody(status int, model string) []byte {
+// maskUpstreamErrorBody 上游错误体的出网掩码：剥渠道特征，但保留官方 API 也会
+// 明说的语义。上下文超长（11115/prompt is too long）翻译成 OpenAI 官方同款
+// context_length_exceeded 文案（含具体 token 数）——笼统化会让下游当服务器故障
+// 无脑重试（实测 2026-10-17 一会话 15 连击）；官方本来就会给出可行动的错误信息。
+func maskUpstreamErrorBody(status int, model string, upstreamBody []byte) []byte {
 	typ := "api_error"
+	code := any(status)
 	msg := "The server had an error while processing your request. Sorry about that!"
 	if status == http.StatusTooManyRequests {
 		typ = "rate_limit_error"
@@ -1305,9 +1312,52 @@ func maskUpstreamErrorBody(status int, model string) []byte {
 		}
 	} else if status >= 500 {
 		typ = "server_error"
+	} else if m := contextLengthExceeded(upstreamBody); m != "" {
+		typ, code, msg = "invalid_request_error", "context_length_exceeded", m
 	}
 	body, _ := json.Marshal(map[string]any{
-		"error": map[string]any{"message": msg, "type": typ, "code": status},
+		"error": map[string]any{"message": msg, "type": typ, "code": code},
 	})
 	return body
+}
+
+// contextLengthExceeded 从上游报文提取超长信息并转成 OpenAI 官方句式；
+// 非超长错误返回 ""。匹配上游 "prompt is too long: N tokens > M maximum"
+// （workbuddy 家族实测形态）与官方形 "maximum context length is M ... N"——
+// 两族数字顺序相反，按分隔符里有无 ">" 判向，再用 got>max 数值自校验兜底。
+var ctxLenRe = regexp.MustCompile(`(\d[\d,]{0,20})\s*tokens?\b[^\d]{0,80}(\d[\d,]{0,20})`)
+
+func contextLengthExceeded(upstreamBody []byte) string {
+	s := string(upstreamBody)
+	if !strings.Contains(s, "too long") && !strings.Contains(s, "context length") && !strings.Contains(s, "11115") {
+		return ""
+	}
+	m := ctxLenRe.FindStringSubmatch(s)
+	if m == nil {
+		return ""
+	}
+	a := strings.ReplaceAll(m[1], ",", "")
+	b := strings.ReplaceAll(m[2], ",", "")
+	got, max := a, b
+	sep := m[0][len(m[1]) : len(m[0])-len(m[2])]
+	if !strings.Contains(sep, ">") {
+		got, max = b, a // 官方形：第一个数是上限
+	}
+	na, nb := atoiSafe(a), atoiSafe(b)
+	if na > 0 && nb > 0 {
+		if got == a && na <= nb {
+			got, max = b, a
+		} else if got == b && nb <= na {
+			got, max = a, b
+		}
+	}
+	return fmt.Sprintf("This model's maximum context length is %s tokens. However, your messages resulted in %s tokens. Please reduce the length of the messages.", max, got)
+}
+
+func atoiSafe(s string) int {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return n
 }
