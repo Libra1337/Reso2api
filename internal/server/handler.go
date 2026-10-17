@@ -1322,13 +1322,40 @@ func maskUpstreamErrorBody(status int, model string, upstreamBody []byte) []byte
 }
 
 // contextLengthExceeded 从上游报文提取超长信息并转成 OpenAI 官方句式；
-// 非超长错误返回 ""。匹配上游 "prompt is too long: N tokens > M maximum"
-// （workbuddy 家族实测形态）与官方形 "maximum context length is M ... N"——
-// 两族数字顺序相反，按分隔符里有无 ">" 判向，再用 got>max 数值自校验兜底。
+// 非超长错误返回 ""。先解码 JSON 字段再匹配——上游报文里 '>' 是 \u003e 转义
+// （2026-10-17 实测曾把 "\u003e" 里的 003 当数字抓出）。两族数字顺序相反
+// （workbuddy "N tokens > M maximum" / 官方 "maximum is M ... N"），但超长
+// 错误里请求量必然大于上限：大数=请求量、小数=上限，附带千级下限防碎片数。
 var ctxLenRe = regexp.MustCompile(`(\d[\d,]{0,20})\s*tokens?\b[^\d]{0,80}(\d[\d,]{0,20})`)
 
 func contextLengthExceeded(upstreamBody []byte) string {
-	s := string(upstreamBody)
+	var probe struct {
+		Msg     string `json:"msg"`
+		Message string `json:"message"`
+		Error   *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		ExtError *struct {
+			Message string `json:"message"`
+		} `json:"extError"`
+	}
+	_ = json.Unmarshal(upstreamBody, &probe)
+	texts := []string{probe.Msg, probe.Message, string(upstreamBody)}
+	if probe.Error != nil {
+		texts = append(texts, probe.Error.Message)
+	}
+	if probe.ExtError != nil {
+		texts = append(texts, probe.ExtError.Message)
+	}
+	for _, txt := range texts {
+		if msg := ctxLenFromText(txt); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+func ctxLenFromText(s string) string {
 	if !strings.Contains(s, "too long") && !strings.Contains(s, "context length") && !strings.Contains(s, "11115") {
 		return ""
 	}
@@ -1336,22 +1363,18 @@ func contextLengthExceeded(upstreamBody []byte) string {
 	if m == nil {
 		return ""
 	}
-	a := strings.ReplaceAll(m[1], ",", "")
-	b := strings.ReplaceAll(m[2], ",", "")
-	got, max := a, b
-	sep := m[0][len(m[1]) : len(m[0])-len(m[2])]
-	if !strings.Contains(sep, ">") {
-		got, max = b, a // 官方形：第一个数是上限
+	na, nb := atoiSafe(strings.ReplaceAll(m[1], ",", "")), atoiSafe(strings.ReplaceAll(m[2], ",", ""))
+	if na <= 0 || nb <= 0 || na == nb {
+		return ""
 	}
-	na, nb := atoiSafe(a), atoiSafe(b)
-	if na > 0 && nb > 0 {
-		if got == a && na <= nb {
-			got, max = b, a
-		} else if got == b && nb <= na {
-			got, max = a, b
-		}
+	got, max := na, nb
+	if got < max {
+		got, max = nb, na
 	}
-	return fmt.Sprintf("This model's maximum context length is %s tokens. However, your messages resulted in %s tokens. Please reduce the length of the messages.", max, got)
+	if max < 1024 { // 上下文上限至少千级，更小说明抓到转义碎片
+		return ""
+	}
+	return fmt.Sprintf("This model's maximum context length is %d tokens. However, your messages resulted in %d tokens. Please reduce the length of the messages.", max, got)
 }
 
 func atoiSafe(s string) int {

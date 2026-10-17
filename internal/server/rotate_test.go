@@ -526,8 +526,9 @@ func (u *interruptUpstream) Stream(w http.ResponseWriter, _ io.Reader) error {
 
 // 上下文超长（11115）必须翻译成官方 context_length_exceeded 同款文案：
 // 笼统化会让下游当服务器故障无限重试（2026-10-17 实测一会话 15 连击）。
+// 注意生产报文 '>' 是 \u003e 转义，必须先解码再抽数（曾把 003 抓成上限）。
 func TestMaskContextLengthExceeded(t *testing.T) {
-	wb := []byte(`{"code":11115,"msg":"prompt is too long: 1495018 tokens > 1048576 maximum","requestId":"77662510"}`)
+	wb := []byte(`{"code":11115,"msg":"prompt is too long: 1495018 tokens \u003e 1048576 maximum","requestId":"77662510"}`)
 	out := string(maskUpstreamErrorBody(http.StatusBadRequest, "deepseek-v4.1-flash", wb))
 	for _, want := range []string{"context_length_exceeded", "invalid_request_error", "1048576", "1495018"} {
 		if !strings.Contains(out, want) {
