@@ -83,18 +83,26 @@ func (t *thinkTagWriter) Write(p []byte) (int, error) {
 
 func (t *thinkTagWriter) writeLine(line string) error {
 	payload, ok := trimDataPrefix(strings.TrimRight(line, "\r\n"))
-	if !ok || payload == "" || payload == "[DONE]" {
+	if !ok || payload == "" {
 		_, err := t.w.Write([]byte(line))
 		if f, ok := t.w.(http.Flusher); ok {
 			f.Flush()
 		}
 		return err
 	}
+	if payload == "[DONE]" {
+		// [DONE] 前先闭合：客户端按 [DONE] 定稿渲染，未闭合的 <think>
+		// 配不上对会被当正文原样输出（断流泄露事故 2026-10-18）。
+		t.closeIfOpen(0)
+		return t.raw(line)
+	}
 	var chunk map[string]any
 	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 		return t.raw(line)
 	}
 	if _, isErr := chunk["error"]; isErr {
+		// 上游错误帧同理：客户端见错误即按失败收尾，先补闭合再透传。
+		t.closeIfOpen(0)
 		return t.raw(line)
 	}
 	choices, _ := chunk["choices"].([]any)
@@ -115,8 +123,12 @@ func (t *thinkTagWriter) writeLine(line string) error {
 		delete(delta, "reasoning")
 		if rv != "" {
 			cv, hasCv := delta["content"].(string)
-			if !t.inThink {
+			if !t.inThink || t.closedThink {
+				// 首段推理，或正文之后再来的推理（交错思考）：开新标签段。
+				// 迟到推理不重新开标签会裸漏进正文（无标签包裹），
+				// 同帧带正文时还会拼出游离 </think> 破坏配对。
 				t.inThink = true
+				t.closedThink = false
 				rv = "<think>" + rv
 			}
 			if hasCv {
@@ -130,8 +142,8 @@ func (t *thinkTagWriter) writeLine(line string) error {
 		}
 		// 终帧（finish_reason）到达而标签未闭合：先补闭合帧再写终帧，
 		// 否则闭合帧会落在 finish_reason 之后（客户端可能已按完成收尾）。
-		if fr, _ := c["finish_reason"].(string); fr != "" && t.inThink && !t.closedThink {
-			t.emitCloseThink(c["index"])
+		if fr, _ := c["finish_reason"].(string); fr != "" {
+			t.closeIfOpen(c["index"])
 		}
 		// 推理结束后的首个实质帧（正文/工具调用）前插入闭合标签
 		if t.inThink && !t.closedThink {
@@ -145,6 +157,14 @@ func (t *thinkTagWriter) writeLine(line string) error {
 	return t.writeChunk(chunk)
 }
 
+// closeIfOpen 幂等补闭合：标签处于未闭合状态才发闭合帧。
+func (t *thinkTagWriter) closeIfOpen(index any) {
+	if t.inThink && !t.closedThink {
+		t.emitCloseThink(index)
+	}
+}
+
+// emitCloseThink 发送独立的闭合标签帧。
 func (t *thinkTagWriter) emitCloseThink(index any) {
 	if index == nil {
 		index = 0
@@ -179,7 +199,5 @@ func (t *thinkTagWriter) raw(s string) error {
 func (t *thinkTagWriter) Finish() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.inThink && !t.closedThink {
-		t.emitCloseThink(0)
-	}
+	t.closeIfOpen(0)
 }

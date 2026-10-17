@@ -140,3 +140,74 @@ func TestThinkTagWriterCloseBeforeFinishFrame(t *testing.T) {
 		t.Errorf("null index emitted: %s", body)
 	}
 }
+
+// 断流收尾（2026-10-18 泄露事故形态）：推理中途上游死亡，Stream 补发
+// error 帧 + [DONE]。闭合必须先于两者——客户端按 [DONE]/错误定稿，
+// 之后到达的闭合帧被丢弃，未闭合的 <think> 会被当正文原样渲染。
+func TestThinkTagWriterCloseBeforeErrorAndDone(t *testing.T) {
+	rec := httptest.NewRecorder()
+	ttw := newThinkTagWriter(rec)
+	_, _ = ttw.Write([]byte(`data: {"id":"x","choices":[{"index":0,"delta":{"reasoning_content":"drafting"}}]}` + "\n\n"))
+	_, _ = ttw.Write([]byte(`data: {"error":{"type":"upstream_stream_ended","message":"upstream stream aborted: EOF"}}` + "\n\n"))
+	_, _ = ttw.Write([]byte("data: [DONE]\n\n"))
+	ttw.Finish()
+	body := rec.Body.String()
+	closeIdx := strings.Index(body, `"</think>\n"`)
+	errIdx := strings.Index(body, `"error"`)
+	doneIdx := strings.Index(body, "[DONE]")
+	if closeIdx < 0 || errIdx < 0 || doneIdx < 0 {
+		t.Fatalf("frames missing: %s", body)
+	}
+	if closeIdx > errIdx || closeIdx > doneIdx {
+		t.Errorf("close must precede error frame and [DONE]: %s", body)
+	}
+	if n := strings.Count(body, "</think>"); n != 1 {
+		t.Errorf("close emitted %d times, want 1", n)
+	}
+}
+
+// 交错思考：正文之后再来的推理必须重新开 <think> 段并闭合，
+// 不得裸拼正文或插入游离闭合标签（拼接后标签必须全部配对）。
+func TestThinkTagWriterInterleavedReasoning(t *testing.T) {
+	rec := httptest.NewRecorder()
+	ttw := newThinkTagWriter(rec)
+	frames := []string{
+		`data: {"id":"x","choices":[{"index":0,"delta":{"reasoning_content":"r1"}}]}` + "\n\n",
+		`data: {"id":"x","choices":[{"index":0,"delta":{"content":"c1"}}]}` + "\n\n",
+		`data: {"id":"x","choices":[{"index":0,"delta":{"reasoning_content":"r2"}}]}` + "\n\n",
+		`data: {"id":"x","choices":[{"index":0,"delta":{"content":"c2"}}]}` + "\n\n",
+	}
+	for _, f := range frames {
+		if _, err := ttw.Write([]byte(f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ttw.Finish()
+	var content strings.Builder
+	for _, ln := range strings.Split(rec.Body.String(), "\n") {
+		payload, ok := trimDataPrefix(strings.TrimRight(ln, "\r"))
+		if !ok || payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk map[string]any
+		if json.Unmarshal([]byte(payload), &chunk) != nil {
+			continue
+		}
+		ch, _ := chunk["choices"].([]any)
+		if len(ch) == 0 {
+			continue
+		}
+		d, _ := ch[0].(map[string]any)["delta"].(map[string]any)
+		if d == nil {
+			continue
+		}
+		if s, _ := d["content"].(string); s != "" {
+			content.WriteString(s)
+		}
+	}
+	got := content.String()
+	want := "<think>r1</think>\nc1<think>r2</think>\nc2"
+	if got != want {
+		t.Errorf("content=%q, want %q", got, want)
+	}
+}
