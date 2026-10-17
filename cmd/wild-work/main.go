@@ -266,6 +266,7 @@ func main() {
 		MaskUpstream:         cfg.Features.MaskUpstream,
 		Routing:              cfg.Routing,
 		Keepalive:            cfg.Keepalive,
+		ContextCompact:       cfg.ContextCompact.Normalized(),
 		KeepaliveDir:         filepath.Join(stateDir, "keepalive"),
 	})
 	appInst.SetHandler(h)

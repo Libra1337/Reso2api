@@ -66,5 +66,11 @@
     "window_min": 45,
     "ping_every_min": 8,
     "max_pings": 6
+  },
+  "context_compact": {
+    "enabled": false,
+    "hard_limit_tokens": 1048576,
+    "reserve_ratio": 0.85,
+    "min_tail_messages": 8
   }
 }

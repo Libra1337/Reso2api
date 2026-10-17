@@ -147,6 +147,12 @@ type Config struct {
 
 	Keepalive KeepaliveConfig `json:"cache_keepalive,omitempty"`
 
+	// ContextCompact 超限上下文网关侧裁剪（config.context_compact）：估算
+	// in tokens 超过 hard_limit_tokens×reserve_ratio 时保留 system 段 + 最近
+	// 消息（tool 配对完整性优先），最早对话段丢弃并插入截断标记消息——让超
+	// 上游硬上限（如 1M）的会话继续可用，而非 400 后被下游无限重试。
+	ContextCompact ContextCompactConfig `json:"context_compact,omitempty"`
+
 	Prompt struct {
 		// Mode 系统提示词策略：passthrough（默认，透传+11128 降级重试）/ custom（整段替换）
 		Mode string `json:"mode"` // custom / passthrough
@@ -216,6 +222,31 @@ func (c KeepaliveConfig) Normalized() KeepaliveConfig {
 	}
 	if c.MaxPings <= 0 {
 		c.MaxPings = 6
+	}
+	return c
+}
+
+// ContextCompactConfig 超限上下文裁剪配置（config.context_compact）：
+// 估算 in tokens 超过 HardLimitTokens×ReserveRatio 时，保留 system 段与最近
+// 消息、丢弃最早对话段并插入截断标记——让超上游硬上限（如 1M）的会话继续
+// 可用，而非 400 后被下游当故障无限重试。
+type ContextCompactConfig struct {
+	Enabled         bool    `json:"enabled"`
+	HardLimitTokens int     `json:"hard_limit_tokens"` // 上游硬上限 token 数（默认 1048576）
+	ReserveRatio    float64 `json:"reserve_ratio"`     // 裁剪后目标占上限比例（默认 0.85）
+	MinTailMessages int     `json:"min_tail_messages"` // 最近消息至少保留条数（默认 8）
+}
+
+// Normalized 补默认值。
+func (c ContextCompactConfig) Normalized() ContextCompactConfig {
+	if c.HardLimitTokens <= 0 {
+		c.HardLimitTokens = 1048576
+	}
+	if c.ReserveRatio <= 0 || c.ReserveRatio >= 1 {
+		c.ReserveRatio = 0.85
+	}
+	if c.MinTailMessages <= 0 {
+		c.MinTailMessages = 8
 	}
 	return c
 }

@@ -65,14 +65,15 @@ type Config struct {
 	// MaskUpstream 上游特征掩码（默认开）：models 去渠道前缀 / 错误报文中性化
 	MaskUpstream *bool
 	// Routing 溢流路由（超大上下文改发缓存稳定模型，见 config.Routing）
-	Routing      config.Routing
-	Keepalive    config.KeepaliveConfig
-	KeepaliveDir string
-	HardCooldown time.Duration
-	SoftCooldown time.Duration
-	ErrThreshold int
-	ErrCooldown  time.Duration
-	RefreshSkew  time.Duration
+	Routing        config.Routing
+	Keepalive      config.KeepaliveConfig
+	ContextCompact config.ContextCompactConfig
+	KeepaliveDir   string
+	HardCooldown   time.Duration
+	SoftCooldown   time.Duration
+	ErrThreshold   int
+	ErrCooldown    time.Duration
+	RefreshSkew    time.Duration
 }
 
 // stickyEntry 粘性路由记录：记录上次路由账号及连续使用次数。
@@ -842,6 +843,11 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 	// 超大上下文溢流路由（routing.overflow）：flash 类大上下文缓存淘汰快，
 	// 超阈值改发缓存稳定的指定模型（响应仍回显请求名）。
 	body, routeModel, model = h.applyOverflow(body, routeModel, model, session)
+	// 超限上下文网关侧裁剪（context_compact）：估算超上游硬上限时保留
+	// system + 最近消息、丢最早对话段，让会话继续可用而非 400。
+	if nb, ok := h.compactContext(body, session); ok {
+		body = nb
+	}
 	// 全池模型冷却快速失败：所有健康账号都被 6004 冷却时，轮转必然空转
 	// （每号一次上游 429 往返，实测一圈 600s+）。立即以 429 回绝并带最早
 	// 重置时刻，让客户端显式重试而非长时间挂死后断连。
@@ -960,14 +966,14 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 						log.Printf("content-block circuit breaker: disable platform=%s uid=%s (11140 x3/h)", rt.Kind, acct.UID)
 					}
 				}
-			out := respBody
-			outStatus := status
-			if h.maskUpstream && !upstream.IsContentPolicyBlock(string(respBody)) {
-				// 上游特征掩码：原始报文写日志（排障），对外发中性 OpenAI 错误
-				log.Printf("upstream error passthrough masked platform=%s uid=%s status=%d body=%.400s",
-					rt.Kind, acct.UID, status, respBody)
-				out = maskUpstreamErrorBody(status, model, respBody)
-			}
+				out := respBody
+				outStatus := status
+				if h.maskUpstream && !upstream.IsContentPolicyBlock(string(respBody)) {
+					// 上游特征掩码：原始报文写日志（排障），对外发中性 OpenAI 错误
+					log.Printf("upstream error passthrough masked platform=%s uid=%s status=%d body=%.400s",
+						rt.Kind, acct.UID, status, respBody)
+					out = maskUpstreamErrorBody(status, model, respBody)
+				}
 				if upstream.IsContentPolicyBlock(string(respBody)) {
 					// 内容审核：回网关防火墙文案，不透传上游 body（账号/业务 code）。
 					// 状态码用 400 不用 403：monoize 类中转把 403 当渠道永久故障，
