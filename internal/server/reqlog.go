@@ -271,8 +271,9 @@ func (s *reqLogStore) SetBodiesDir(dir string) {
 // 排查视觉问题时临时开启）。进程启动时求值一次。
 var logAllBodies = os.Getenv("WB2A_LOG_ALL_BODIES") != ""
 
-// bodyArchiveCap 单条存档上限（logAllBodies 时 8MiB，覆盖接近入口
-// chatBodyLimit 的带图大请求）。
+// bodyArchiveCap 单条存档上限（logAllBodies 时 8MiB；入口 chatBodyLimit
+// 已放宽到 32MiB，超 8MiB 的超大请求存档截断——排障看开头足够，全量
+// 落盘会撑爆磁盘）。
 func bodyArchiveCap() int {
 	if logAllBodies {
 		return 8 << 20

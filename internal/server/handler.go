@@ -565,14 +565,19 @@ func (h *Handler) fetchRuntimeModels(rt *Runtime) []provider.ModelInfo {
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	t0 := time.Now()
-	const chatBodyLimit = 8 << 20
+	// 入口字节上限：只防异常超大载荷（内存安全），不做业务级限制——
+	// 超大上下文由 dispatchChat 的溢流路由 + context_compact 裁剪消化
+	//（实测会话 body 已达 5MiB+ 且持续增长，8MiB 顶到后裁剪逻辑
+	// 根本没机会跑，2026-10-18 413 事故）。
+	const chatBodyLimit = 32 << 20
 	body, err := io.ReadAll(io.LimitReader(r.Body, chatBodyLimit+1))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
 	if len(body) > chatBodyLimit {
-		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "invalid_request", "request body exceeds 8MiB limit")
+		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "invalid_request",
+			fmt.Sprintf("request body exceeds %dMiB limit", chatBodyLimit>>20))
 		return
 	}
 	var peek struct {
