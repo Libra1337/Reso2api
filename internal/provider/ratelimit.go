@@ -26,6 +26,18 @@ var (
 // softRateTimeLayout 上游重置时间的格式（无时区后缀；时区固定 UTC+8）。
 const softRateTimeLayout = "2006-01-02 15:04:05"
 
+// IsQuotaExhausted 报告 429 body 是否为 14018「额度已用尽」。
+// 语义：间歇性额度窗口——同号同窗口其他请求仍有 200（2026-10-26 实测
+// 12d107e7 等号 24h 出 1500+ 200 仍间歇命中），上游不给重置时刻。
+// 与 hardMarkers 的「额度用尽」差一个「已」字曾长期漏匹配，此处按
+// 业务码 + 文案双通道识别。
+func IsQuotaExhausted(body string) bool {
+	return strings.Contains(body, "14018") ||
+		strings.Contains(body, "额度已用尽") ||
+		strings.Contains(body, "购买加量包")
+}
+
+
 // IsModelRateLimit 报告 429 body 是否明确指向模型级限流（业务 code 6004）。
 // `"code":6004` / `"code": 6004` / `"code":"6004"` 均可命中（JSON 空格容差）。
 func IsModelRateLimit(body string) bool {

@@ -373,6 +373,10 @@ var dynamicModelsCache struct {
 const (
 	dynamicModelsTTL        = time.Hour
 	modelsFetchFailCooldown = 5 * time.Minute
+	// quotaExhaustModelCool 14018 额度已尽的「号×模型」冷却窗口。
+	// 上游不给重置时刻；实测同号小时内仍有 200（间歇窗口），取 1h
+	// 平衡：挡住同请求轮转空转，又不长时间错杀还能出 200 的号。
+	quotaExhaustModelCool = time.Hour
 )
 
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
@@ -534,17 +538,21 @@ func (h *Handler) fetchRuntimeModels(rt *Runtime) []provider.ModelInfo {
 	if acct == nil {
 		return nil
 	}
+	// 模型接口与对话接口同鉴权：过期 token 直接 401，且这里的失败是静默的
+	// （对外退回静态表），必须先续 token，否则账号过期后模型列表永久停在旧表。
+	if acct.NeedsRefresh(10 * time.Minute) {
+		if err := rt.Upstream.RefreshToken(acct); err != nil {
+			log.Printf("models fetch kind=%s uid=%s: token refresh failed: %v", rt.Kind, acct.UID, err)
+			noteModelsFail(rt, time.Now())
+			return nil
+		}
+	}
 	infos, err := rt.Upstream.FetchModels(acct)
 	if err != nil || len(infos) == 0 {
-		now := time.Now()
-		rt.mu.Lock()
-		rt.lastFail = now
-		rt.mu.Unlock()
-		if rt.Kind == provider.WorkBuddy {
-			dynamicModelsCache.Lock()
-			dynamicModelsCache.lastFail = now
-			dynamicModelsCache.Unlock()
+		if err != nil {
+			log.Printf("models fetch failed kind=%s uid=%s err=%v (serving static fallback)", rt.Kind, acct.UID, err)
 		}
+		noteModelsFail(rt, time.Now())
 		return nil
 	}
 	now := time.Now()
@@ -561,6 +569,48 @@ func (h *Handler) fetchRuntimeModels(rt *Runtime) []provider.ModelInfo {
 		dynamicModelsCache.Unlock()
 	}
 	return infos
+}
+
+// noteModelsFail 记录一次模型拉取失败（进入 5 分钟失败冷却，期间不再重试）。
+func noteModelsFail(rt *Runtime, now time.Time) {
+	rt.mu.Lock()
+	rt.lastFail = now
+	rt.mu.Unlock()
+	if rt.Kind == provider.WorkBuddy {
+		dynamicModelsCache.Lock()
+		dynamicModelsCache.lastFail = now
+		dynamicModelsCache.Unlock()
+	}
+}
+
+// RefreshModels 强制清空各渠道动态模型缓存并立即重拉（面板「刷新」联动）。
+// 正常路径下模型表 1 小时 TTL 到期才会重拉；此方法绕过 TTL 与失败冷却，
+// 让手动刷新立即拿到上游最新模型（新模型上线不必等 TTL 或重启）。
+func (h *Handler) RefreshModels() {
+	for _, k := range h.runtimeKinds() {
+		rt := h.cfg.Runtimes[k]
+		if rt == nil || rt.Pool == nil || len(rt.Pool.List()) == 0 {
+			continue
+		}
+		rt.mu.Lock()
+		rt.models = nil
+		rt.fetched = time.Time{}
+		rt.lastFail = time.Time{}
+		rt.mu.Unlock()
+		if rt.Kind == provider.WorkBuddy {
+			dynamicModelsCache.Lock()
+			dynamicModelsCache.ids = nil
+			dynamicModelsCache.fetched = time.Time{}
+			dynamicModelsCache.lastFail = time.Time{}
+			dynamicModelsCache.Unlock()
+		}
+		infos := h.fetchRuntimeModels(rt)
+		if len(infos) == 0 {
+			log.Printf("models refresh kind=%s: fetch failed, static fallback in effect", rt.Kind)
+			continue
+		}
+		log.Printf("models refresh kind=%s count=%d", rt.Kind, len(infos))
+	}
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -945,13 +995,25 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 					if !ok {
 						resetAt = time.Now().Add(h.cfg.SoftCooldown)
 					}
-					rt.Pool.CooldownSoftForModel(acct.UID, resetAt, routeModel, "6004 model rate limit")
-					log.Printf("model rate limit rotate platform=%s uid=%s model=%s reset=%s",
-						rt.Kind, acct.UID, routeModel, resetAt.Format(time.RFC3339))
-					h.stickyClear(rt, session)
-					lastErr = &provider.Error{Kind: kind, Status: status, Msg: string(respBody)}
-					continue
-				}
+				rt.Pool.CooldownSoftForModel(acct.UID, resetAt, routeModel, "6004 model rate limit")
+				log.Printf("model rate limit rotate platform=%s uid=%s model=%s reset=%s",
+					rt.Kind, acct.UID, routeModel, resetAt.Format(time.RFC3339))
+				h.stickyClear(rt, session)
+				lastErr = &provider.Error{Kind: kind, Status: status, Msg: string(respBody)}
+				continue
+			}
+			// 14018「额度已用尽」：间歇性额度窗口（同号同窗口仍有 200），
+			// 整号硬冷却会错杀产能；上游不给重置时刻，按 6004 同款
+			// 「号×模型」冷却走固定窗口。此前文案差一个「已」字漏匹配，
+			// 全落 60s 软冷却→轮转耗尽→对外持续 429（2026-10-26 事故）。
+			if provider.IsQuotaExhausted(string(respBody)) {
+				rt.Pool.CooldownSoftForModel(acct.UID, time.Now().Add(quotaExhaustModelCool), routeModel, "14018 额度已用尽")
+				log.Printf("quota exhausted rotate platform=%s uid=%s model=%s cool=%s (14018)",
+					rt.Kind, acct.UID, routeModel, quotaExhaustModelCool)
+				h.stickyClear(rt, session)
+				lastErr = &provider.Error{Kind: kind, Status: status, Msg: string(respBody)}
+				continue
+			}
 				h.stickyClear(rt, session)
 				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "429 rate limit")
 			case provider.ErrSessionDead:
@@ -965,10 +1027,10 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 			default: // ErrClient / ErrNotFound：请求本身被上游拒绝
 				// 不清粘性：11140 内容审核 / 11133 参数错是请求内容问题，
 				// 账号本身健康，会话下一轮继续用同号可保住上游前缀缓存。
-				// 11140 内容审核熔断：短窗多次说明持续发违规内容，停号止损防整号拉黑
+				// 11140 内容审核熔断：短窗多次说明持续发违规内容，冷却止损防整号拉黑
 				if status == http.StatusForbidden && strings.Contains(string(respBody), "11140") {
 					if rt.Pool.NoteContentBlock(acct.UID) {
-						log.Printf("content-block circuit breaker: disable platform=%s uid=%s (11140 x3/h)", rt.Kind, acct.UID)
+						log.Printf("content-block circuit breaker: cooldown platform=%s uid=%s (11140 x5/h, auto-recover)", rt.Kind, acct.UID)
 					}
 				}
 				out := respBody

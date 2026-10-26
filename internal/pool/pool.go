@@ -583,9 +583,21 @@ func (p *Pool) ModelCooldowns() []ModelCoolSummary {
 	return out
 }
 
+// contentBlock 熔断参数：
+//   - 阈值 5（原 3）：粘性路由下单个中转用户的违规内容就落在同一号上，
+//     3 次太敏感——一个用户即可连环烧号（2026-10-26 事故：132 号被熔断，
+//     其中积分 3000+ 的富裕号占多半）；
+//   - 熔断动作从永久禁用改为冷却 2h：永久禁用的号闲置数周后被上游拉黑，
+//     复活实验证实救不回（token 活但 11140 全拦）；冷却自愈不烂在池里，
+//     也免面板手工批量启用。
+const (
+	contentBlockThreshold = 5
+	contentBlockCool      = 2 * time.Hour
+)
+
 // NoteContentBlock 记一次上游 11140（内容审核拦截）。返回 true 表示
-// 已达熔断阈值并禁用：1 小时内 ≥3 次 = 该号在持续发送违规内容，
-// 继续放行大概率被整号拉黑，先自动停用止损（面板可手动重启用）。
+// 已达熔断阈值并进入冷却：1 小时内 ≥5 次 = 该号在持续发送违规内容，
+// 继续放行大概率被整号拉黑，冷却停用止损（自动恢复）。
 func (p *Pool) NoteContentBlock(uid string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -602,9 +614,9 @@ func (p *Pool) NoteContentBlock(uid string) bool {
 	}
 	kept = append(kept, now)
 	e.contentBlocks = kept
-	if len(e.contentBlocks) >= 3 {
-		e.disabled = true
-		e.reason = "11140 x" + fmt.Sprintf("%d", len(e.contentBlocks)) + "/h 内容审核熔断（防烧号）"
+	if len(e.contentBlocks) >= contentBlockThreshold {
+		e.until = now.Add(contentBlockCool)
+		e.reason = fmt.Sprintf("11140 x%d/h 内容审核熔断（冷却%v自动恢复）", len(e.contentBlocks), contentBlockCool)
 		e.contentBlocks = nil
 		p.saveLocked()
 		return true

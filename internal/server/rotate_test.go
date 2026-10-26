@@ -22,6 +22,7 @@ type rotateUpstream struct {
 	mu    sync.Mutex
 	calls []string
 	limit map[string]bool
+	quota map[string]bool
 }
 
 func (u *rotateUpstream) RefreshToken(*auth.Auth) error { return nil }
@@ -55,14 +56,54 @@ func (u *rotateUpstream) ChatStream(a *auth.Auth, _ []byte) (io.ReadCloser, int,
 	u.mu.Lock()
 	u.calls = append(u.calls, a.UID)
 	limit := u.limit[a.UID]
+	quota := u.quota[a.UID]
 	u.mu.Unlock()
 	if limit {
 		body := `{"code":6004,"msg":"glm-5.3 用量超限，将在 2099-01-01 18:00:00 重置"}`
 		return nil, http.StatusTooManyRequests, []byte(body), nil
 	}
+	if quota {
+		body := `{"error":{"data":{"code":14018,"msg":"额度已用尽，请访问以下链接，购买加量包以获取更多额度：https://www.codebuddy.cn/profile/usage"}}}`
+		return nil, http.StatusTooManyRequests, []byte(body), nil
+	}
 	sse := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n" +
 		"data: [DONE]\n\n"
 	return io.NopCloser(strings.NewReader(sse)), http.StatusOK, nil, nil
+}
+
+func TestDispatchChatRotatesOnQuotaExhausted(t *testing.T) {
+	p := pool.New("")
+	a1 := &auth.Auth{UID: "u1", AccessToken: "t1", ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	a2 := &auth.Auth{UID: "u2", AccessToken: "t2", ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	p.Add(a1)
+	p.Add(a2)
+	p.SetCredits("u1", 100)
+	p.SetCredits("u2", 90)
+	up := &rotateUpstream{quota: map[string]bool{"u1": true}}
+	h := NewHandler(Config{
+		Pool:      p,
+		Upstream:  up,
+		MaxRotate: 5,
+	})
+	rt := h.cfg.Runtimes[provider.WorkBuddy]
+	body := []byte(`{"model":"glm-5.3","messages":[{"role":"user","content":"hi"}]}`)
+	h.sticky[h.stickyKey(rt.Kind, upstream.ConversationFingerprint(body))] = &stickyEntry{uid: "u1", maxReqs: 50, lastUsed: time.Now()}
+	rec := httptest.NewRecorder()
+	rc, uid, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", body, rec, "")
+	if !ok {
+		t.Fatalf("dispatch failed status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	defer rc.Close()
+	if uid != "u2" {
+		t.Fatalf("uid=%s want u2 (rotate off quota-exhausted account)", uid)
+	}
+	// 14018 按「号×模型」冷却：u1 对 glm-5.3 冷却中，u2 不受影响
+	if !p.CooledForModel("u1", "glm-5.3") {
+		t.Fatal("u1 glm-5.3 should be cooling after 14018")
+	}
+	if p.CooledForModel("u2", "glm-5.3") {
+		t.Fatal("u2 should not be cooled")
+	}
 }
 
 func TestDispatchChatRotatesOnModelRateLimit(t *testing.T) {

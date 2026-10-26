@@ -2492,7 +2492,7 @@ func (a *App) FeesInfo() map[string]any {
 	}
 
 	result := map[string]any{
-		"note":       "费率随上游平台政策动态变化，请以官方为准；点击「刷新费率」重新拉取。",
+		"note":       "费率与模型列表随上游动态变化；点击「刷新」同时重新拉取费率与模型列表。",
 		"channels":   channels,
 		"disclaimer": "本工具仅聚合转发，不参与定价；渠道费率以各上游官方页面为准。",
 		"cached_at":  a.pricingFetched.Format("01-02 15:04"),
@@ -2551,6 +2551,12 @@ func (a *App) RefreshPricing() {
 	}
 	a.pricingMu.Unlock()
 	a.savePricingCache()
+
+	// 联动刷新各渠道动态模型缓存（/v1/models 平日 1h TTL 才重拉）：
+	// 面板「刷新」按钮与每小时的缓存后台刷新都走这里，新模型不必等 TTL。
+	if a.handler != nil {
+		a.handler.RefreshModels()
+	}
 }
 
 // loadPricingCache 从文件加载定价缓存。

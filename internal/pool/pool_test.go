@@ -287,22 +287,24 @@ func TestPickExcludingForModelSkipsCooled(t *testing.T) {
 	}
 }
 
-// 11140 熔断：1 小时内 3 次自动禁用（防持续违规内容烧号）。
+// 11140 熔断：1 小时内 5 次进入冷却（非禁用，自动恢复；防持续违规内容烧号）。
 func TestNoteContentBlockCircuitBreaker(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	if p.NoteContentBlock("u1") {
-		t.Fatal("first block must not disable")
-	}
-	if p.NoteContentBlock("u1") {
-		t.Fatal("second block must not disable")
+	for i := 0; i < contentBlockThreshold-1; i++ {
+		if p.NoteContentBlock("u1") {
+			t.Fatalf("block #%d must not trip", i+1)
+		}
 	}
 	if !p.NoteContentBlock("u1") {
-		t.Fatal("third block within 1h should disable")
+		t.Fatalf("%d blocks within 1h should trip", contentBlockThreshold)
 	}
 	st, _ := p.Status("u1")
-	if !st.Disabled || st.Reason == "" {
-		t.Fatalf("should be disabled with reason: %+v", st)
+	if st.Disabled {
+		t.Fatalf("breaker must cool down, not disable: %+v", st)
+	}
+	if st.Reason == "" {
+		t.Fatalf("should carry reason: %+v", st)
 	}
 }
 
