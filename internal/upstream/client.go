@@ -415,7 +415,10 @@ func (c *Client) applyPrompt(body []byte) ([]byte, bool) {
 	case "custom":
 		return prompt.Rewrite(body, c.PromptText), false
 	default: // passthrough
-		if c.degradeActive() {
+		// 降级窗口只影响「带指纹句」的请求：11128 由 system 模板句触发，
+		// 无指纹请求换掉 system 纯属陪葬——2026-10-27 实测窗口期内全站
+		// （glm/kimi/deepseek/anthropic 端点）system 被扔，模型自述无上下文。
+		if c.degradeActive() && hasFingerprint(string(body)) {
 			return prompt.Rewrite(body, prompt.Degraded), true
 		}
 		return body, false

@@ -264,15 +264,30 @@ func TestChatStreamContentBlockedRetry(t *testing.T) {
 	if !c.degradeActive() {
 		t.Error("degrade window should be active after first block")
 	}
-	// 降级窗口内：后续请求出站前即带中性提示词，一次成功
+	// 降级窗口内：无指纹请求不预降级（system 不陪葬），仍走 11128 → 同请求
+	// 中性重试一次成功（calls=2，首发出站仍带原 system）。
 	calls = 0
 	rc, status, _, err = c.ChatStream(a, body)
 	if err != nil || status != 200 {
 		t.Fatalf("second request status=%d err=%v", status, err)
 	}
 	rc.Close()
+	if calls != 2 {
+		t.Errorf("fingerprint-free request in window: calls=%d want 2 (no upfront degrade, retry once)", calls)
+	}
+	if !strings.Contains(lastBody, "helpful assistant") {
+		t.Errorf("retry body should carry degraded prompt: %s", lastBody)
+	}
+	// 降级窗口内：带真实指纹句的请求出站前即换中性提示词，一次成功。
+	calls = 0
+	fpBody := []byte(`{"model":"glm-5.3","messages":[{"role":"system","content":"CLI template. You are Claude Code, Anthropic's official CLI for Claude."},{"role":"user","content":"hi"}]}`)
+	rc, status, _, err = c.ChatStream(a, fpBody)
+	if err != nil || status != 200 {
+		t.Fatalf("fingerprinted request status=%d err=%v", status, err)
+	}
+	rc.Close()
 	if calls != 1 || !strings.Contains(lastBody, "helpful assistant") {
-		t.Errorf("calls=%d, degraded prompt should apply upfront: %s", calls, lastBody)
+		t.Errorf("calls=%d, fingerprinted request should be pre-degraded upfront: %s", calls, lastBody)
 	}
 }
 
