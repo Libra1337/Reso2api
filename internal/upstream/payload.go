@@ -52,6 +52,12 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 	if bytes.Contains(src, []byte(`"video_url"`)) {
 		expandVideoParts(obj)
 	}
+	// 上游契约缺口适配（见 adapt.go）：动态工具提升、json_schema 仿真、
+	// effort 优先级、assistant 开头占位——上游只认标准形态，网关翻译。
+	if bytes.Contains(src, []byte(`"tools"`)) || bytes.Contains(src, []byte(`"thinking"`)) ||
+		bytes.Contains(src, []byte(`"response_format"`)) {
+		AdaptUpstreamGaps(obj)
+	}
 	// assistant 轮的图片上游直接丢弃（见 images.go）：挪到紧随其后的合成
 	// user 消息，模型才可见。
 	relocateAssistantImages(obj)

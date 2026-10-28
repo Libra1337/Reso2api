@@ -15,13 +15,16 @@ package upstream
 import (
 	"bytes"
 	"encoding/base64"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // videoMaxBytes 单个内嵌视频的解码上限（base64 后）。
@@ -90,8 +93,10 @@ func expandVideoParts(obj map[string]any) {
 	}
 }
 
-// videoFramesFor 从 video_url 段提取帧 base64。无法处理（URL 形态/超限/
-// ffmpeg 缺失/抽帧失败）返回 nil，调用方保持原段不变。
+// videoFramesFor 从 video_url 段提取帧 base64。支持三种形态：
+// data:video/*;base64,内嵌 / 裸 base64（无前缀，按魔数识别，KVV 实测上游
+// 静默丢弃）/ http(s) URL（上游不拉取，网关限时限体积代下载后抽帧）。
+// 无法处理（超限/下载失败/ffmpeg 缺失/抽帧失败）返回 nil，原段不变。
 func videoFramesFor(part map[string]any) []string {
 	url := ""
 	switch v := part["video_url"].(type) {
@@ -100,26 +105,81 @@ func videoFramesFor(part map[string]any) []string {
 	case string:
 		url = v
 	}
-	const prefix = "data:video/"
-	if !strings.HasPrefix(url, prefix) {
+	var raw []byte
+	switch {
+	case strings.HasPrefix(url, "data:video/"):
+		b64 := url
+		if i := strings.Index(b64, ","); i >= 0 {
+			b64 = b64[i+1:]
+		}
+		if len(b64) > base64.StdEncoding.EncodedLen(videoMaxBytes) {
+			log.Printf("video adapt: video too large (%dB base64), passthrough", len(b64))
+			return nil
+		}
+		d, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil || len(d) == 0 || !isVideoBytes(d) {
+			return nil
+		}
+		raw = d
+	case strings.HasPrefix(url, "data:"):
 		return nil
-	}
-	b64, ok := strings.CutPrefix(url, "data:")
-	if !ok {
-		return nil
-	}
-	if i := strings.Index(b64, ","); i >= 0 {
-		b64 = b64[i+1:]
-	}
-	if len(b64) > base64.StdEncoding.EncodedLen(videoMaxBytes) {
-		log.Printf("video adapt: video too large (%dB base64), passthrough", len(b64))
-		return nil
-	}
-	raw, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil || len(raw) == 0 {
-		return nil
+	case strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://"):
+		d, ok := fetchVideo(url)
+		if !ok {
+			return nil
+		}
+		raw = d
+	default:
+		// 裸 base64：上游静默丢弃（KVV 实测），网关按魔数识别后抽帧。
+		if len(url) < 64 || len(url) > base64.StdEncoding.EncodedLen(videoMaxBytes) {
+			return nil
+		}
+		d, err := base64.StdEncoding.DecodeString(url)
+		if err != nil || len(d) == 0 || !isVideoBytes(d) {
+			return nil
+		}
+		raw = d
 	}
 	return extractFrames(raw)
+}
+
+// isVideoBytes 视频容器魔数：mp4([size]ftyp)/webm·mkv(EBML)/avi(RIFF)。
+func isVideoBytes(d []byte) bool {
+	if len(d) < 12 {
+		return false
+	}
+	if bytes.HasPrefix(d[4:], []byte("ftyp")) {
+		return true
+	}
+	if d[0] == 0x1A && d[1] == 0x45 && d[2] == 0xDF && d[3] == 0xA3 {
+		return true
+	}
+	return bytes.HasPrefix(d, []byte("RIFF"))
+}
+
+// videosHTTP 代下载客户端：总超时兜底体积。
+var videosHTTP = &http.Client{Timeout: 25 * time.Second}
+
+// fetchVideo 限时限体积下载 URL 视频（≤videoMaxBytes）。
+func fetchVideo(url string) ([]byte, bool) {
+	resp, err := videosHTTP.Get(url)
+	if err != nil {
+		log.Printf("video adapt: fetch failed: %v", err)
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		log.Printf("video adapt: fetch status %d", resp.StatusCode)
+		return nil, false
+	}
+	d, err := io.ReadAll(io.LimitReader(resp.Body, videoMaxBytes+1))
+	if err != nil || len(d) == 0 || len(d) > videoMaxBytes || !isVideoBytes(d) {
+		if len(d) > videoMaxBytes {
+			log.Printf("video adapt: fetched video too large (%dB), passthrough", len(d))
+		}
+		return nil, false
+	}
+	return d, true
 }
 
 // extractFrames 落盘临时文件后调 ffmpeg 抽帧（fps=1 / 768 / ≤10 帧 / q5）。
