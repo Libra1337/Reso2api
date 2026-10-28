@@ -23,7 +23,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wild-work ./cmd/wi
 
 # ── 运行时 ─────────────────────────────────────────────────
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata wget \
+RUN apk add --no-cache ca-certificates tzdata wget ffmpeg \
  && adduser -D -u 10001 app \
  && mkdir -p /app/auths /app/data \
  && chown -R app:app /app

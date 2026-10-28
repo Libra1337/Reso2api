@@ -481,6 +481,9 @@ func thinkVariant(entry map[string]any) (map[string]any, bool) {
 // visionModelSource 判断模型是否视觉可用且名字不含客户端可识别的视觉字样。
 // 客户端（Cherry Studio / Open WebUI 等）按名字启发式判定视觉能力，缺
 // vl/vision 字样的视觉模型在聊天里直接不发图；对这类模型暴露 -vl 别名。
+// kimi-k3 系：上游实测识图正常（2026-10-28，图问色答 Red），但名字无
+// 视觉字样导致客户端不给发图入口——用户侧长期误以为"没有识图"。
+// （kimi-k3 系视频上游明确不支持，"current model does not support videos"。）
 func visionModelSource(id string) bool {
 	lower := strings.ToLower(id)
 	if strings.HasSuffix(lower, "-vl") || strings.HasSuffix(lower, "-vision") {
@@ -488,7 +491,7 @@ func visionModelSource(id string) bool {
 	}
 	vision := strings.Contains(lower, "vl") || strings.Contains(lower, "vision") ||
 		strings.Contains(lower, "5v") || strings.Contains(lower, "4o") ||
-		strings.Contains(lower, "deepseek-v4.1")
+		strings.Contains(lower, "deepseek-v4.1") || strings.Contains(lower, "kimi-k3")
 	nameSignalsVision := strings.Contains(lower, "vl") || strings.Contains(lower, "vision") ||
 		strings.Contains(lower, "4o")
 	return vision && !nameSignalsVision

@@ -7,6 +7,7 @@
 package upstream
 
 import (
+	"bytes"
 	"encoding/json"
 	"log"
 	"strings"
@@ -46,6 +47,11 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 	// 不带 "data:image/xxx;base64," 前缀，上游模型提供方直接 400 code=11133，
 	// 表现为视觉模型无法使用视觉功能。
 	normalizeImageURLs(obj)
+	// 视频抽帧适配（见 videos.go）：上游中继拦截 video_url（kimi-k3 系实测
+	// 真 mp4 也回「不支持视频」），识图通路正常——内嵌视频抽帧改发图片。
+	if bytes.Contains(src, []byte(`"video_url"`)) {
+		expandVideoParts(obj)
+	}
 	// assistant 轮的图片上游直接丢弃（见 images.go）：挪到紧随其后的合成
 	// user 消息，模型才可见。
 	relocateAssistantImages(obj)
