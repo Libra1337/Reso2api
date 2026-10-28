@@ -87,9 +87,10 @@ func TestDispatchChatRotatesOnQuotaExhausted(t *testing.T) {
 	})
 	rt := h.cfg.Runtimes[provider.WorkBuddy]
 	body := []byte(`{"model":"glm-5.3","messages":[{"role":"user","content":"hi"}]}`)
-	h.sticky[h.stickyKey(rt.Kind, upstream.ConversationFingerprint(body))] = &stickyEntry{uid: "u1", maxReqs: 50, lastUsed: time.Now()}
+	session := upstream.ConversationFingerprint(body)
+	h.sticky[h.stickyKey(rt.Kind, session)] = &stickyEntry{uid: "u1", maxReqs: 50, lastUsed: time.Now()}
 	rec := httptest.NewRecorder()
-	rc, uid, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", body, rec, "")
+	rc, uid, ok := h.dispatchChat(rt, time.Now(), "workbuddy/glm-5.3", body, rec, session)
 	if !ok {
 		t.Fatalf("dispatch failed status=%d body=%s", rec.Code, rec.Body.String())
 	}
