@@ -188,6 +188,9 @@ func assistantToolCallIDs(msg map[string]any) []string {
 
 // isEmptyAssistant 判断 assistant 消息剥掉 tool_calls 后是否还有实质内容。
 func isEmptyAssistant(msg map[string]any) bool {
+	if msgHasPayloadFields(msg) {
+		return false // 携带其他字段：按有效消息保留，交上游判定
+	}
 	if s, _ := msg["content"].(string); strings.TrimSpace(s) != "" {
 		return false
 	}
@@ -346,6 +349,22 @@ func (c *Client) resaltCacheKey(prepared []byte) []byte {
 	return out
 }
 
+// msgHasPayloadFields 消息上出现 role/内容字段之外的其他键（tools/name/
+// metadata 等）即视为携带载荷，不得按空消息删除——KVV 报告实测（2026-10-28
+// LynShen 网关验证）content 为空的 system 消息连内嵌 tools 一起被静默删除，
+// 动态工具请求被改成普通对话后 200 返回，客户端无从察觉。
+func msgHasPayloadFields(m map[string]any) bool {
+	for k := range m {
+		switch k {
+		case "role", "content", "reasoning", "reasoning_content", "tool_calls":
+			continue
+		default:
+			return true
+		}
+	}
+	return false
+}
+
 // isEmptyPlaceholder 无信息量占位消息：非 user/tool，且 content/reasoning/
 // tool_calls 全空（或缺失）。ZCode/Codex 断流重连后会在 assistant(tool_calls)
 // 与结果之间插入一条空 assistant，上游对这种形态判 11148。
@@ -356,6 +375,9 @@ func isEmptyPlaceholder(m map[string]any) bool {
 	}
 	if tcs, ok := m["tool_calls"].([]any); ok && len(tcs) > 0 {
 		return false
+	}
+	if msgHasPayloadFields(m) {
+		return false // 携带其他字段（如消息内 tools）：按有效消息保留
 	}
 	for _, k := range []string{"content", "reasoning", "reasoning_content"} {
 		if v, ok := m[k]; ok {
