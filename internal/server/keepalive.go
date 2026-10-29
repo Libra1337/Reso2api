@@ -237,6 +237,9 @@ func (h *Handler) runKeepaliveLoop(store *keepaliveStore) {
 	if store == nil || !store.cfg.Enabled {
 		return
 	}
+	log.Printf("cache keepalive loop started: default=%dm/%dm/%d fastEvict=%dm/%dm/%d window=%dm",
+		store.cfg.IdleAfterMin, store.cfg.PingEveryMin, store.cfg.MaxPings,
+		fastEvictIdleAfterMin, fastEvictPingEveryMin, fastEvictMaxPings, store.cfg.WindowMin)
 	go func() {
 		for {
 			time.Sleep(2 * time.Minute)
@@ -260,17 +263,21 @@ func (h *Handler) keepalivePing(store *keepaliveStore, e *keepaliveEntry) {
 	defer store.done(e)
 	body, err := os.ReadFile(e.file)
 	if err != nil || len(body) == 0 {
+		log.Printf("cache keepalive skip: read body failed model=%s uid=%.8s err=%v", e.model, e.uid, err)
 		return
 	}
 	rt := h.cfg.Runtimes[runtimeKindOf(e.kind)]
 	if rt == nil || rt.Pool == nil || rt.Upstream == nil {
+		log.Printf("cache keepalive skip: runtime missing kind=%s model=%s", e.kind, e.model)
 		return
 	}
 	acct := rt.Pool.AuthByUID(e.uid)
 	if acct == nil {
+		log.Printf("cache keepalive skip: account gone model=%s uid=%.8s", e.model, e.uid)
 		return
 	}
 	if status, ok := rt.Pool.Status(e.uid); ok && (status.Cooling || status.Disabled) {
+		log.Printf("cache keepalive skip: account %s model=%s uid=%.8s", map[bool]string{true: "cooling", false: "disabled"}[status.Cooling], e.model, e.uid)
 		return
 	}
 	ping := rewriteMaxTokensSmall(body)
