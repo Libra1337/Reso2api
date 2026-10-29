@@ -48,7 +48,8 @@ type keepaliveEntry struct {
 var fastEvictModels = []string{"glm-5.3-flash"}
 
 const (
-	fastEvictIdleAfterMin = 2  // 闲置 2 分钟即起保（默认 6）
+	keepaliveMaxEntries   = 512 // 保活索引容量上限（原 64,见 track 内注释）
+	fastEvictIdleAfterMin = 2   // 闲置 2 分钟即起保（默认 6）
 	fastEvictPingEveryMin = 3  // 每 3 分钟一次（默认 8），低于上游淘汰时长
 	fastEvictMaxPings     = 15 // 45min 窗口 ×3min 间隔 ≈ 15 轮（默认 6）
 )
@@ -118,8 +119,12 @@ func (s *keepaliveStore) track(session, kind, uid string, body []byte) {
 		e.lastSeen, e.pings, e.inFlight = time.Now(), 0, false
 		return
 	}
-	// 容量上限：清最旧
-	if len(s.entries) >= 64 {
+	// 容量上限：清最旧。64 时代 idle 条目会被高频新会话瞬间挤出
+	//（monoize agent 大军持续开新会话,闲置会话还没等到第一次 ping 就被
+	// 淘汰,保活形同虚设——2026-10-29 实测 flash 种子 3 分钟内被挤掉）;
+	// 提到 512 覆盖高会话并发(条目均在 45min 窗口内自然过期,磁盘峰值
+	// ~1-2GB 可接受)。
+	if len(s.entries) >= keepaliveMaxEntries {
 		var oldestK string
 		var oldestT time.Time
 		for k, e := range s.entries {
