@@ -476,7 +476,7 @@ func TestCacheKeepalive(t *testing.T) {
 	if len(store.entries) != 0 {
 		t.Fatal("small body must not be tracked")
 	}
-	big := []byte(`{"model":"glm-5.3-flash","max_tokens":4096,"messages":[{"role":"user","content":"` + strings.Repeat("大", 5000) + `"}]}`)
+	big := []byte(`{"model":"glm-5.3","max_tokens":4096,"messages":[{"role":"user","content":"` + strings.Repeat("大", 5000) + `"}]}`)
 	store.track("s-big", "workbuddy", "u1", big)
 	if len(store.entries) != 1 {
 		t.Fatalf("entries=%d want 1", len(store.entries))
@@ -512,7 +512,7 @@ func TestCacheKeepalive(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up, MaxRotate: 5})
 	h.ka = store
 	h.keepalivePing(store, e)
-	if up.model != "glm-5.3-flash" || up.maxTokens != 16 || up.uid != "u1" {
+	if up.model != "glm-5.3" || up.maxTokens != 16 || up.uid != "u1" {
 		t.Fatalf("ping got model=%s max=%d uid=%s", up.model, up.maxTokens, up.uid)
 	}
 }

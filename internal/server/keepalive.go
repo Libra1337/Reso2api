@@ -32,12 +32,44 @@ import (
 type keepaliveEntry struct {
 	kind     string // runtime kind
 	uid      string // 粘住的账号（同账号同缓存）
+	model    string // 会话主模型（快淘汰模型走加密保活节奏）
 	file     string // body 存档路径
 	lastIn   int64  // 最近一轮真实 in_tokens
 	lastSeen time.Time
 	lastPing time.Time
 	pings    int
 	inFlight bool
+}
+
+// fastEvictModels 上游前缀缓存淘汰显著快于常规的模型：实测 glm-5.3-flash
+// 闲置数分钟即失效（keepalive 默认 6min 起保 + 8min 间隔追不上淘汰速度，
+// ping 到时缓存已丢）。对这些模型加密节奏：更早起、更高频、窗口内允许
+// 更多轮——把「闲置到 ping」的空窗压到淘汰时长以内。
+var fastEvictModels = []string{"glm-5.3-flash"}
+
+const (
+	fastEvictIdleAfterMin = 2  // 闲置 2 分钟即起保（默认 6）
+	fastEvictPingEveryMin = 3  // 每 3 分钟一次（默认 8），低于上游淘汰时长
+	fastEvictMaxPings     = 15 // 45min 窗口 ×3min 间隔 ≈ 15 轮（默认 6）
+)
+
+// isFastEvictModel 报告模型是否走快淘汰保活节奏（子串匹配覆盖 -vl/@think 变体）。
+func isFastEvictModel(model string) bool {
+	lm := strings.ToLower(model)
+	for _, m := range fastEvictModels {
+		if strings.Contains(lm, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// cadenceFor 按条目模型返回（起保闲置分钟, ping 间隔分钟, 最大轮数）。
+func cadenceFor(cfg config.KeepaliveConfig, model string) (int, int, int) {
+	if isFastEvictModel(model) {
+		return fastEvictIdleAfterMin, fastEvictPingEveryMin, fastEvictMaxPings
+	}
+	return cfg.IdleAfterMin, cfg.PingEveryMin, cfg.MaxPings
 }
 
 // keepaliveStore 保活索引 + 磁盘存档。
@@ -80,8 +112,9 @@ func (s *keepaliveStore) track(session, kind, uid string, body []byte) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	model := extractModel(body)
 	if e, ok := s.entries[session]; ok {
-		e.uid, e.kind, e.file = uid, kind, fp
+		e.uid, e.kind, e.model, e.file = uid, kind, model, fp
 		e.lastSeen, e.pings, e.inFlight = time.Now(), 0, false
 		return
 	}
@@ -102,7 +135,7 @@ func (s *keepaliveStore) track(session, kind, uid string, body []byte) {
 		}
 	}
 	s.entries[session] = &keepaliveEntry{
-		kind: kind, uid: uid, file: fp, lastSeen: time.Now(),
+		kind: kind, uid: uid, model: model, file: fp, lastSeen: time.Now(),
 	}
 }
 
@@ -144,8 +177,9 @@ func (s *keepaliveStore) sweepDue(now time.Time) []*keepaliveEntry {
 		if e.inFlight {
 			continue
 		}
+		idleAfter, pingEvery, maxPings := cadenceFor(s.cfg, e.model)
 		idle := now.Sub(e.lastSeen)
-		if idle < time.Duration(s.cfg.IdleAfterMin)*time.Minute {
+		if idle < time.Duration(idleAfter)*time.Minute {
 			continue
 		}
 		if idle > time.Duration(s.cfg.WindowMin)*time.Minute {
@@ -153,10 +187,10 @@ func (s *keepaliveStore) sweepDue(now time.Time) []*keepaliveEntry {
 			delete(s.entries, sessionOf(s.entries, e))
 			continue
 		}
-		if e.pings >= s.cfg.MaxPings {
+		if e.pings >= maxPings {
 			continue
 		}
-		if !e.lastPing.IsZero() && now.Sub(e.lastPing) < time.Duration(s.cfg.PingEveryMin)*time.Minute {
+		if !e.lastPing.IsZero() && now.Sub(e.lastPing) < time.Duration(pingEvery)*time.Minute {
 			continue
 		}
 		e.lastPing, e.inFlight = now, true
@@ -245,6 +279,6 @@ func (h *Handler) keepalivePing(store *keepaliveStore, e *keepaliveEntry) {
 		_, _ = io.Copy(io.Discard, io.LimitReader(rc, 8192))
 		_ = rc.Close()
 	}
-	log.Printf("cache keepalive ping kind=%s uid=%.8s in≈%dk status=%d err=%v",
-		e.kind, e.uid, e.lastIn/1000, status, err != nil)
+	log.Printf("cache keepalive ping kind=%s model=%s uid=%.8s in≈%dk status=%d err=%v",
+		e.kind, e.model, e.uid, e.lastIn/1000, status, err != nil)
 }
