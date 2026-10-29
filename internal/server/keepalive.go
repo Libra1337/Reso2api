@@ -106,9 +106,11 @@ func (s *keepaliveStore) track(session, kind, uid string, body []byte) {
 	fp := filepath.Join(s.dir, name)
 	tmp := fp + ".tmp"
 	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		log.Printf("cache keepalive track-fail: write err=%v model=%s bytes=%d", err, extractModel(body), len(body))
 		return
 	}
 	if err := os.Rename(tmp, fp); err != nil {
+		log.Printf("cache keepalive track-fail: rename err=%v model=%s", err, extractModel(body))
 		return
 	}
 	s.mu.Lock()
@@ -142,6 +144,7 @@ func (s *keepaliveStore) track(session, kind, uid string, body []byte) {
 	s.entries[session] = &keepaliveEntry{
 		kind: kind, uid: uid, model: model, file: fp, lastSeen: time.Now(),
 	}
+	log.Printf("cache keepalive tracked model=%s uid=%.8s bytes=%d entries=%d", model, uid, len(body), len(s.entries))
 }
 
 // noteIn 更新会话最近真实 in_tokens（保活资格与日志展示用）。
