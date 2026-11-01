@@ -34,6 +34,7 @@ type keepaliveEntry struct {
 	uid      string // 粘住的账号（同账号同缓存）
 	model    string // 会话主模型（快淘汰模型走加密保活节奏）
 	file     string // body 存档路径
+	bytes    int64  // 存档体量（超大前缀不快 ping，见 fastEvictMaxBytes）
 	lastIn   int64  // 最近一轮真实 in_tokens
 	lastSeen time.Time
 	lastPing time.Time
@@ -48,10 +49,16 @@ type keepaliveEntry struct {
 var fastEvictModels = []string{"glm-5.3-flash"}
 
 const (
-	keepaliveMaxEntries   = 512 // 保活索引容量上限（原 64,见 track 内注释）
-	fastEvictIdleAfterMin = 2   // 闲置 2 分钟即起保（默认 6）
-	fastEvictPingEveryMin = 3  // 每 3 分钟一次（默认 8），低于上游淘汰时长
-	fastEvictMaxPings     = 15 // 45min 窗口 ×3min 间隔 ≈ 15 轮（默认 6）
+	keepaliveMaxEntries = 512 // 保活索引容量上限（原 64,见 track 内注释）
+	// 快淘汰节奏用秒级（2026-11-02 实测：flash 前缀闲置 <3min 即丢，
+	// 3min 间隔的 ping 全打在空缓存上；60s 一发才能压进淘汰窗口内）。
+	fastEvictIdleAfter = 90 * time.Second // 闲置 90s 即起保（默认 6min）
+	fastEvictPingEvery = 60 * time.Second // 每 60s 一发（默认 8min）
+	fastEvictMaxPings  = 20               // ≈20min 覆盖窗口（默认 6）
+	// fastEvictMaxBytes 快 ping 的体量护栏：超过此体量（≈54 万 token）的
+	// 巨型前缀上游亚分钟级即丢（2026-11-02 d8de01ae 实测：独占账号、间隔
+	// 24-75s 仍整前缀丢失），快 ping 只会反复冷启白烧配额——保留默认慢节奏。
+	fastEvictMaxBytes = 1_200_000
 )
 
 // isFastEvictModel 报告模型是否走快淘汰保活节奏（子串匹配覆盖 -vl/@think 变体）。
@@ -65,12 +72,13 @@ func isFastEvictModel(model string) bool {
 	return false
 }
 
-// cadenceFor 按条目模型返回（起保闲置分钟, ping 间隔分钟, 最大轮数）。
-func cadenceFor(cfg config.KeepaliveConfig, model string) (int, int, int) {
-	if isFastEvictModel(model) {
-		return fastEvictIdleAfterMin, fastEvictPingEveryMin, fastEvictMaxPings
+// cadenceFor 按条目模型与体量返回（起保闲置, ping 间隔, 最大轮数）。
+func cadenceFor(cfg config.KeepaliveConfig, e *keepaliveEntry) (time.Duration, time.Duration, int) {
+	if isFastEvictModel(e.model) && e.bytes <= fastEvictMaxBytes {
+		return fastEvictIdleAfter, fastEvictPingEvery, fastEvictMaxPings
 	}
-	return cfg.IdleAfterMin, cfg.PingEveryMin, cfg.MaxPings
+	return time.Duration(cfg.IdleAfterMin) * time.Minute,
+		time.Duration(cfg.PingEveryMin) * time.Minute, cfg.MaxPings
 }
 
 // keepaliveStore 保活索引 + 磁盘存档。
@@ -118,7 +126,7 @@ func (s *keepaliveStore) track(session, kind, uid string, body []byte) {
 	model := extractModel(body)
 	if e, ok := s.entries[session]; ok {
 		e.uid, e.kind, e.model, e.file = uid, kind, model, fp
-		e.lastSeen, e.pings, e.inFlight = time.Now(), 0, false
+		e.bytes, e.lastSeen, e.pings, e.inFlight = int64(len(body)), time.Now(), 0, false
 		return
 	}
 	// 容量上限：清最旧。64 时代 idle 条目会被高频新会话瞬间挤出
@@ -142,7 +150,7 @@ func (s *keepaliveStore) track(session, kind, uid string, body []byte) {
 		}
 	}
 	s.entries[session] = &keepaliveEntry{
-		kind: kind, uid: uid, model: model, file: fp, lastSeen: time.Now(),
+		kind: kind, uid: uid, model: model, file: fp, bytes: int64(len(body)), lastSeen: time.Now(),
 	}
 	log.Printf("cache keepalive tracked model=%s uid=%.8s bytes=%d entries=%d", model, uid, len(body), len(s.entries))
 }
@@ -185,9 +193,9 @@ func (s *keepaliveStore) sweepDue(now time.Time) []*keepaliveEntry {
 		if e.inFlight {
 			continue
 		}
-		idleAfter, pingEvery, maxPings := cadenceFor(s.cfg, e.model)
+		idleAfter, pingEvery, maxPings := cadenceFor(s.cfg, e)
 		idle := now.Sub(e.lastSeen)
-		if idle < time.Duration(idleAfter)*time.Minute {
+		if idle < idleAfter {
 			continue
 		}
 		if idle > time.Duration(s.cfg.WindowMin)*time.Minute {
@@ -198,7 +206,7 @@ func (s *keepaliveStore) sweepDue(now time.Time) []*keepaliveEntry {
 		if e.pings >= maxPings {
 			continue
 		}
-		if !e.lastPing.IsZero() && now.Sub(e.lastPing) < time.Duration(pingEvery)*time.Minute {
+		if !e.lastPing.IsZero() && now.Sub(e.lastPing) < pingEvery {
 			continue
 		}
 		e.lastPing, e.inFlight = now, true
@@ -245,12 +253,12 @@ func (h *Handler) runKeepaliveLoop(store *keepaliveStore) {
 	if store == nil || !store.cfg.Enabled {
 		return
 	}
-	log.Printf("cache keepalive loop started: default=%dm/%dm/%d fastEvict=%dm/%dm/%d window=%dm",
+	log.Printf("cache keepalive loop started: default=%dm/%dm/%d fastEvict=%s/%s/%d(≤%dKB) window=%dm sweep=30s",
 		store.cfg.IdleAfterMin, store.cfg.PingEveryMin, store.cfg.MaxPings,
-		fastEvictIdleAfterMin, fastEvictPingEveryMin, fastEvictMaxPings, store.cfg.WindowMin)
+		fastEvictIdleAfter, fastEvictPingEvery, fastEvictMaxPings, fastEvictMaxBytes/1000, store.cfg.WindowMin)
 	go func() {
 		for {
-			time.Sleep(2 * time.Minute)
+			time.Sleep(30 * time.Second)
 			for _, e := range store.sweepDue(time.Now()) {
 				go h.keepalivePing(store, e)
 			}
