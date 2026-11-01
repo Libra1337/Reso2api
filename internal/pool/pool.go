@@ -246,6 +246,55 @@ func (p *Pool) pick(tried map[string]bool, model string, avoidHeavy bool) *auth.
 	return cand[rand.Intn(len(cand))].a
 }
 
+// PickHeavyDistributing 重会话感知选号：上游对单账号的前缀缓存有容量上限，
+// 多个超大上下文会话挤同一账号会互相 LRU 踢缓存（2026-10-30 实测两个
+// ~600k token 会话同账号，100% 命中与 1.3% 交替）。按 heavyLoad（该账号
+// 当前绑定的活跃重会话数）升序、积分降序排候选，前三随机；负载相同时
+// 退化为普通 pick 语义。heavyLoad 由调用方（handler 的粘性表）提供。
+func (p *Pool) PickHeavyDistributing(tried map[string]bool, model string, heavyLoad func(uid string) int) *auth.Auth {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	var cand []*entry
+	for uid, e := range p.byUID {
+		if tried != nil && tried[uid] {
+			continue
+		}
+		if !e.healthy(now) {
+			continue
+		}
+		if e.cooledForModel(model, now) {
+			continue
+		}
+		cand = append(cand, e)
+	}
+	if len(cand) == 0 {
+		return nil
+	}
+	if heavyLoad == nil {
+		heavyLoad = func(string) int { return 0 }
+	}
+	sort.SliceStable(cand, func(i, j int) bool {
+		li, lj := heavyLoad(cand[i].a.UID), heavyLoad(cand[j].a.UID)
+		if li != lj {
+			return li < lj
+		}
+		return cand[i].credits > cand[j].credits
+	})
+	// 只在「最小重负载组」内随机：重会话必须避开已有重会话的账号
+	//（top-K 随机会以 1/K 概率撞回重负载账号,分散无保证）。
+	minLoad := heavyLoad(cand[0].a.UID)
+	last := 1
+	for last < len(cand) && heavyLoad(cand[last].a.UID) == minLoad {
+		last++
+	}
+	cand = cand[:last]
+	if len(cand) > pickTopK {
+		cand = cand[:pickTopK]
+	}
+	return cand[rand.Intn(len(cand))].a
+}
+
 // SetCredits 更新账号余额。
 func (p *Pool) SetCredits(uid string, credits int64) {
 	p.mu.Lock()

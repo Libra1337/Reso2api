@@ -84,6 +84,7 @@ type stickyEntry struct {
 	reqCount int
 	maxReqs  int
 	lastUsed time.Time
+	heavy    bool // 大上下文会话（落号时判定）:上游单账号缓存容量有限,重会话需分散
 }
 
 // 会话级粘性的淘汰参数：空闲超时 + 条目上限（插入新条目时顺带清扫）。
@@ -248,17 +249,49 @@ func (h *Handler) pickWithStickyForModel(rt *Runtime, model, session string, bod
 		}
 	}
 
-	acct := h.pickFresh(rt, nil, model, body)
+	// 重会话分散落号：多个超大上下文会话挤同一账号会互相 LRU 踢掉对方的
+	// 前缀缓存（2026-10-30 实测 ~600k 会话 100%/1.3% 交替命中）。新粘性
+	// 建立时重会话优先落到「已绑定活跃重会话最少」的账号。
+	var acct *auth.Auth
+	heavy := heavySessionBody(body)
+	if heavy {
+		acct = rt.Pool.PickHeavyDistributing(nil, model, h.heavyLoadOf)
+	} else {
+		acct = h.pickFresh(rt, nil, model, body)
+	}
 	if acct == nil {
 		return nil
 	}
 
 	h.stickyMu.Lock()
 	h.evictStickyLocked()
-	h.sticky[key] = &stickyEntry{uid: acct.UID, maxReqs: defaultMaxReqs, lastUsed: time.Now()}
+	h.sticky[key] = &stickyEntry{uid: acct.UID, maxReqs: defaultMaxReqs, lastUsed: time.Now(), heavy: heavy}
 	h.stickyMu.Unlock()
-	log.Printf("new sticky route platform=%s uid=%s model=%s maxReqs=%d", rt.Kind, acct.UID, model, defaultMaxReqs)
+	log.Printf("new sticky route platform=%s uid=%s model=%s maxReqs=%d heavy=%v", rt.Kind, acct.UID, model, defaultMaxReqs, heavy)
 	return acct
+}
+
+// heavySessionTokens 重会话门槛（token 估算）：≥此值的会话前缀大、缓存
+// 占用高，参与账号分散。
+const heavySessionTokens = 100_000
+
+// heavySessionBody 按出站 body 字节估算（~2.2B/token）判定重会话。
+func heavySessionBody(body []byte) bool {
+	return int64(float64(len(body))/2.2) >= heavySessionTokens
+}
+
+// heavyLoadOf 账号当前绑定的活跃重会话数（1h 内使用过的粘性条目）。
+func (h *Handler) heavyLoadOf(uid string) int {
+	n := 0
+	cut := time.Now().Add(-time.Hour)
+	h.stickyMu.RLock()
+	defer h.stickyMu.RUnlock()
+	for _, e := range h.sticky {
+		if e.heavy && e.uid == uid && e.lastUsed.After(cut) {
+			n++
+		}
+	}
+	return n
 }
 
 // evictStickyLocked 清扫粘性记录（调用方持锁）：先删空闲超时条目，
