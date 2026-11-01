@@ -826,7 +826,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if h.ka != nil {
 		h.ka.noteIn(session, num(usage["prompt_tokens"]))
 	}
-	h.noteQualityMap(rt, uid, usage, respToolCalled(resp))
+	h.noteQualityMap(rt, uid, usage, respToolCalled(resp), respFinishReason(resp))
 	if h.maskUpstream {
 		maskAggregateResp(resp, displayNameFor(requestedModel))
 	}
@@ -851,8 +851,8 @@ func (h *Handler) pickFresh(rt *Runtime, tried map[string]bool, model string, bo
 
 // noteQuality 流式收尾的质量降级判定：大输入 200 完成，但输出 <1000 tokens、
 // 无 tool_calls、finish 不是 tool_calls——上游对该号静默降质（思考半截直出、
-// 计划模式断流）。记一次质量降级：该号 30min 内避开重任务，10min 内 3 次则
-// 整体冷却 10min 逼粘性会话换号。
+// 计划模式断流）。记一次质量降级：该号 30min 内避开重任务。
+// finish=length 是用户压了 max_tokens 的合规短输出，不算降级。
 func (h *Handler) noteQuality(rt *Runtime, uid string, tee *usageTee) {
 	if uid == "" {
 		return
@@ -866,7 +866,7 @@ func (h *Handler) noteQuality(rt *Runtime, uid string, tee *usageTee) {
 	if inTok < 50_000 || outTok >= 1_000 {
 		return
 	}
-	if tee.toolSeen() || tee.finishReason() == "tool_calls" {
+	if tee.toolSeen() || tee.finishReason() == "tool_calls" || tee.finishReason() == "length" {
 		return
 	}
 	rt.Pool.NoteQualityDegraded(uid)
@@ -875,7 +875,7 @@ func (h *Handler) noteQuality(rt *Runtime, uid string, tee *usageTee) {
 }
 
 // noteQualityMap 非流式版本。
-func (h *Handler) noteQualityMap(rt *Runtime, uid string, usage map[string]any, toolCalled bool) {
+func (h *Handler) noteQualityMap(rt *Runtime, uid string, usage map[string]any, toolCalled bool, finish string) {
 	if uid == "" || usage == nil {
 		return
 	}
@@ -884,12 +884,26 @@ func (h *Handler) noteQualityMap(rt *Runtime, uid string, usage map[string]any, 
 	if inTok < 50_000 || outTok >= 1_000 {
 		return
 	}
-	if toolCalled {
+	if toolCalled || finish == "length" {
 		return
 	}
 	rt.Pool.NoteQualityDegraded(uid)
 	log.Printf("quality degraded platform=%s uid=%s in=%d out=%d (non-stream) -> heavy-avoid 30m",
 		rt.Kind, uid, inTok, outTok)
+}
+
+// respFinishReason 非流式响应首个 choice 的 finish_reason（缺省空串）。
+func respFinishReason(resp map[string]any) string {
+	choices, _ := resp["choices"].([]any)
+	if len(choices) == 0 {
+		return ""
+	}
+	c, ok := choices[0].(map[string]any)
+	if !ok {
+		return ""
+	}
+	f, _ := c["finish_reason"].(string)
+	return f
 }
 
 // respToolCalled 非流式响应里是否有 tool_calls。

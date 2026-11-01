@@ -379,8 +379,12 @@ func (p *Pool) Remove(uid string) {
 }
 
 // NoteError 记录一次非余额/非 429 错误；达到 threshold 自动冷却 d 时长。
-// NoteQualityDegraded 记一次输出质量降级：heavy 窗口内避开重任务；
-// 连续多次（qualityFails ≥ 3/10min）升级为短暂整体冷却，把粘性会话逼换号。
+// NoteQualityDegraded 记一次输出质量降级：heavy 窗口内避开重任务。
+// 不升级为整体冷却：大输入+简短回复是合法流量（一句话总结/确认类），
+// 误判冷却会断粘性换号，把账号敏感模型的前缀缓存整段打冷——2026-11-02
+// 长任务实测 38 万 token 会话每 3 发被逼换号（flash 按内容寻址侥幸全中，
+// deepseek 类账号键缓存每跳全冷）。降级号由 heavyAvoid(30m) 让新重会话
+// 避开；已粘住的会话不受影响。
 func (p *Pool) NoteQualityDegraded(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -399,10 +403,6 @@ func (p *Pool) NoteQualityDegraded(uid string) {
 	e.qualityFails = append(keep, now)
 	e.heavyUntil = now.Add(30 * time.Minute)
 	p.saveLocked()
-	if len(e.qualityFails) >= 3 {
-		e.until = now.Add(10 * time.Minute)
-		e.reason = "quality degraded x3"
-	}
 }
 
 func (p *Pool) NoteError(uid string, threshold int, d time.Duration) {

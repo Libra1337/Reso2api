@@ -394,3 +394,34 @@ func TestCooledForModelAll(t *testing.T) {
 		t.Fatalf("最早解除时刻应约 1h 后: %v", until)
 	}
 }
+
+// 质量降级不再升级为整号冷却：大输入+简短回复是合法流量，误判冷却会断
+// 粘性换号、打冷账号键缓存（2026-11-02 长任务实测）。降级号仍被重任务
+// 选号避开（heavyAvoid 30m），但普通选号与粘性复用不受影响。
+func TestQualityDegradedDoesNotCooldown(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.SetCredits("u1", 100)
+	p.SetCredits("u2", 50)
+	for i := 0; i < 3; i++ {
+		p.NoteQualityDegraded("u1")
+	}
+	if st, ok := p.Status("u1"); !ok || st.Cooling {
+		t.Fatal("质量降级 x3 不应整号冷却(会断粘性)")
+	}
+	// 重任务选号避开降级号
+	if got := p.PickExcludingForModelHeavy(nil, ""); got == nil || got.UID != "u2" {
+		t.Fatalf("重任务应避开降级号, got %+v", got)
+	}
+	// 普通选号不受影响(候选内随机,u1 仍可命中)
+	seenU1 := false
+	for i := 0; i < 40 && !seenU1; i++ {
+		if got := p.Pick(); got != nil && got.UID == "u1" {
+			seenU1 = true
+		}
+	}
+	if !seenU1 {
+		t.Fatal("普通选号不应受质量降级影响(u1 应仍可命中)")
+	}
+}
