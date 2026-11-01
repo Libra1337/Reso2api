@@ -74,3 +74,28 @@ func TestHeavyLoadOfActive(t *testing.T) {
 		t.Fatalf("u2 heavyLoad=%d want 1", n)
 	}
 }
+
+
+// 轮换路径同样体量分散:已有大前缀的账号在换号时被避开。
+func TestRotationAvoidsLoadedAccount(t *testing.T) {
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "rich", AccessToken: "t", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	p.Add(&auth.Auth{UID: "quiet", AccessToken: "t", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	p.SetCredits("rich", 1000)
+	p.SetCredits("quiet", 10) // rich 积分碾压,普通选号必落 rich
+	up := &rotateUpstream{}
+	h := NewHandler(Config{Pool: p, Upstream: up, MaxRotate: 5})
+	rt := h.cfg.Runtimes[provider.WorkBuddy]
+	// 账号 rich 已绑一个 500k 大前缀会话
+	h.sticky["loaded"] = &stickyEntry{uid: "rich", lastUsed: time.Now(), heavy: true, estTok: 500000}
+	// 新的中等会话(120k ≥ distributeMinTokens)落号应避开 rich
+	body := []byte(`{"model":"glm-5.3-flash","messages":[{"role":"user","content":"` + strings.Repeat("转", 120000) + `"}}]}`)
+	sess := upstream.ConversationFingerprint(body)
+	_, uid, ok := h.dispatchChat(rt, time.Now(), "glm-5.3-flash", body, httptest.NewRecorder(), sess)
+	if !ok {
+		t.Fatal("dispatch failed")
+	}
+	if uid != "quiet" {
+		t.Fatalf("中等会话应避开已载账号 rich,实际落 %s", uid)
+	}
+}

@@ -246,11 +246,11 @@ func (p *Pool) pick(tried map[string]bool, model string, avoidHeavy bool) *auth.
 	return cand[rand.Intn(len(cand))].a
 }
 
-// PickHeavyDistributing 重会话感知选号：上游对单账号的前缀缓存有容量上限，
-// 多个超大上下文会话挤同一账号会互相 LRU 踢缓存（2026-10-30 实测两个
-// ~600k token 会话同账号，100% 命中与 1.3% 交替）。按 heavyLoad（该账号
-// 当前绑定的活跃重会话数）升序、积分降序排候选，前三随机；负载相同时
-// 退化为普通 pick 语义。heavyLoad 由调用方（handler 的粘性表）提供。
+// PickHeavyDistributing 前缀体量分散选号：上游对单账号的前缀缓存有容量
+// 上限，同账号多个大前缀会互相 LRU 踢缓存（2026-10-30/11-02 两轮实测：
+// 100% 命中与 1.3% 交替）。按 load（该账号当前绑定的活跃会话前缀体量,
+// 调用方提供,千 token 口径）升序、积分降序排候选,只在「最小负载组」内
+// 取前三随机；全部同载时即普通 pick 语义。
 func (p *Pool) PickHeavyDistributing(tried map[string]bool, model string, heavyLoad func(uid string) int) *auth.Auth {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

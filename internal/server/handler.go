@@ -84,7 +84,8 @@ type stickyEntry struct {
 	reqCount int
 	maxReqs  int
 	lastUsed time.Time
-	heavy    bool // 大上下文会话（落号时判定）:上游单账号缓存容量有限,重会话需分散
+	heavy    bool   // 大上下文会话（落号时判定）:上游单账号缓存容量有限,重会话需分散
+	estTok   int64  // 会话出站 token 估算（前缀缓存占用量级,负载分散口径）
 }
 
 // 会话级粘性的淘汰参数：空闲超时 + 条目上限（插入新条目时顺带清扫）。
@@ -249,13 +250,15 @@ func (h *Handler) pickWithStickyForModel(rt *Runtime, model, session string, bod
 		}
 	}
 
-	// 重会话分散落号：多个超大上下文会话挤同一账号会互相 LRU 踢掉对方的
-	// 前缀缓存（2026-10-30 实测 ~600k 会话 100%/1.3% 交替命中）。新粘性
-	// 建立时重会话优先落到「已绑定活跃重会话最少」的账号。
+	// 前缀体量分散落号：上游对单账号的前缀缓存有容量上限,同账号上多个
+	// 大前缀(不管分属几个会话/几个模型)会互相 LRU 踢（2026-11-02 实测
+	// 一个多模型 agent 舰队全挤积分最高账号,595k 会话每分钟 100%↔1.3%
+	// 交替）。新粘性建立时,中等以上会话按「账号累计前缀体量最小」落号。
+	est := estTokens(body)
 	var acct *auth.Auth
-	heavy := heavySessionBody(body)
-	if heavy {
-		acct = rt.Pool.PickHeavyDistributing(nil, model, h.heavyLoadOf)
+	heavy := est >= heavySessionTokens
+	if est >= distributeMinTokens {
+		acct = rt.Pool.PickHeavyDistributing(nil, model, h.prefixLoadOf)
 	} else {
 		acct = h.pickFresh(rt, nil, model, body)
 	}
@@ -265,10 +268,33 @@ func (h *Handler) pickWithStickyForModel(rt *Runtime, model, session string, bod
 
 	h.stickyMu.Lock()
 	h.evictStickyLocked()
-	h.sticky[key] = &stickyEntry{uid: acct.UID, maxReqs: defaultMaxReqs, lastUsed: time.Now(), heavy: heavy}
+	h.sticky[key] = &stickyEntry{uid: acct.UID, maxReqs: defaultMaxReqs, lastUsed: time.Now(), heavy: heavy, estTok: est}
 	h.stickyMu.Unlock()
-	log.Printf("new sticky route platform=%s uid=%s model=%s maxReqs=%d heavy=%v", rt.Kind, acct.UID, model, defaultMaxReqs, heavy)
+	log.Printf("new sticky route platform=%s uid=%s model=%s maxReqs=%d heavy=%v est=%dk", rt.Kind, acct.UID, model, defaultMaxReqs, heavy, est/1000)
 	return acct
+}
+
+// distributeMinTokens 参与体量分散的门槛：中小会话前缀小、单账号缓存
+// 装得下若干个,不必牺牲积分均衡;≥30k token 的会话开始构成缓存压力。
+const distributeMinTokens = 30_000
+
+// estTokens 出站 body 字节估算 token（与 compact/keepalive 同系数）。
+func estTokens(body []byte) int64 {
+	return int64(float64(len(body)) / 2.2)
+}
+
+// prefixLoadOf 账号当前绑定的活跃会话前缀体量合计（1h 内,token 估算）。
+func (h *Handler) prefixLoadOf(uid string) int {
+	n := int64(0)
+	cut := time.Now().Add(-time.Hour)
+	h.stickyMu.RLock()
+	defer h.stickyMu.RUnlock()
+	for _, e := range h.sticky {
+		if e.uid == uid && e.lastUsed.After(cut) {
+			n += e.estTok
+		}
+	}
+	return int(n / 1000) // 千 token 口径,避免 int 溢出噪音
 }
 
 // heavySessionTokens 重会话门槛（token 估算）：≥此值的会话前缀大、缓存
@@ -810,8 +836,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 // heavyBody 重任务判定：出站 body 超过 150KB（约 5 万 token）。
 func heavyBody(body []byte) bool { return len(body) > 150*1024 }
 
-// pickFresh 换号选号：重任务时优先避开质量降级中的账号（全员降级则退化普通选号）。
+// pickFresh 换号选号：中等以上会话按「账号累计前缀体量最小」分散
+//（轮换路径同样会造成大前缀扎堆——2026-11-02 实测舰队经轮换全部落回
+// 积分最高账号）；小会话维持原语义（重任务时优先避开质量降级账号）。
 func (h *Handler) pickFresh(rt *Runtime, tried map[string]bool, model string, body []byte) *auth.Auth {
+	if estTokens(body) >= distributeMinTokens {
+		return rt.Pool.PickHeavyDistributing(tried, model, h.prefixLoadOf)
+	}
 	if heavyBody(body) {
 		return rt.Pool.PickExcludingForModelHeavy(tried, model)
 	}
