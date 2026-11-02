@@ -980,8 +980,10 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 	// 超阈值改发缓存稳定的指定模型（响应仍回显请求名）。
 	body, routeModel, model = h.applyOverflow(body, routeModel, model, session)
 	// 超限上下文网关侧裁剪（context_compact）：估算超上游硬上限时保留
-	// system + 最近消息、丢最早对话段，让会话继续可用而非 400。
-	if nb, ok := h.compactContext(body, session); ok {
+	// system + 最近消息、丢最早对话段，让会话继续可用而非 400；命中
+	// models+cache_limit_tokens 时按缓存档阈值裁（flash 类超体量前缀
+	// 上游缓存承不住）。
+	if nb, ok := h.compactContext(body, session, routeModel); ok {
 		body = nb
 	}
 	// 全池模型冷却快速失败：所有健康账号都被 6004 冷却时，轮转必然空转

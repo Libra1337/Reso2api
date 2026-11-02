@@ -71,6 +71,8 @@
     "enabled": false,
     "hard_limit_tokens": 1048576,
     "reserve_ratio": 0.85,
-    "min_tail_messages": 8
+    "min_tail_messages": 8,
+    "models": [],
+    "cache_limit_tokens": 0
   }
 }

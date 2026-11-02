@@ -235,6 +235,14 @@ type ContextCompactConfig struct {
 	HardLimitTokens int     `json:"hard_limit_tokens"` // 上游硬上限 token 数（默认 1048576）
 	ReserveRatio    float64 `json:"reserve_ratio"`     // 裁剪后目标占上限比例（默认 0.85）
 	MinTailMessages int     `json:"min_tail_messages"` // 最近消息至少保留条数（默认 8）
+	// Models 模型白名单（子串匹配，如 ["glm-5.3-flash"]）。非空时只对命中
+	// 的模型裁剪；空 = 对全部模型按硬上限保护（旧语义）。
+	Models []string `json:"models,omitempty"`
+	// CacheLimitTokens 缓存档位裁剪阈值（est token 口径；命中 Models 的模型
+	// 优先用它替代 HardLimitTokens）：flash 类上游缓存对超体量前缀承不住
+	// （2026-11-02 实测 59 万 token 前缀忙时 8% 命中，50 万以下 90%+），把
+	// 会话裁回缓存稳定承载的体量。0 = 不启用缓存档裁剪。
+	CacheLimitTokens int `json:"cache_limit_tokens,omitempty"`
 }
 
 // Normalized 补默认值。

@@ -18,6 +18,8 @@ import (
 	"log"
 	"strconv"
 	"strings"
+
+	"wild-work/internal/config"
 )
 
 // compactBytesPerToken 粗估系数（与 applyOverflow 同源：zh 混合语料 ~2.6 字节/token）。
@@ -26,15 +28,46 @@ const compactBytesPerToken = 2.6
 // imageExtraTokens 每个图片内容项的保守附加 token（视觉项不占字节占 token）。
 const imageExtraTokens = 1200
 
+// compactQuantumTokens 切点量化步长（est token）：客户端每轮全量回放历史，
+// 按预算从尾收消息的切点会逐轮前移、标记计数逐轮变化，前缀缓存永远稳不
+// 住。把「丢弃段体量」对齐到该步长的整数倍，切点就能连续多轮不动，只在
+// 跨过下一格时滑动一次（一次冷启，随后继续稳定命中）。
+const compactQuantumTokens = 20_000
+
+// compactModelMatched Models 白名单子串匹配（空列表 = 全部命中，旧语义）。
+func compactModelMatched(cc config.ContextCompactConfig, model string) bool {
+	if len(cc.Models) == 0 {
+		return true
+	}
+	lm := strings.ToLower(model)
+	for _, m := range cc.Models {
+		if strings.Contains(lm, strings.ToLower(m)) {
+			return true
+		}
+	}
+	return false
+}
+
 // compactContext 超限时裁剪请求体。返回（新 body, 是否发生裁剪）。
+// 阈值选择：命中 Models 且配了 CacheLimitTokens → 缓存档裁剪（flash 类
+// 超体量前缀上游缓存承不住）；否则 HardLimitTokens 硬上限保护。
 // 不超限或裁不动（无 messages / system 段自身超限 / 尾巴装不下最少条数）
 // → 原样返回，交给错误路径报官方 context_length_exceeded。
-func (h *Handler) compactContext(body []byte, session string) ([]byte, bool) {
+func (h *Handler) compactContext(body []byte, session, model string) ([]byte, bool) {
 	cc := h.cfg.ContextCompact.Normalized()
-	if !cc.Enabled {
+	if !cc.Enabled || !compactModelMatched(cc, model) {
 		return body, false
 	}
-	budget := int64(float64(cc.HardLimitTokens) * cc.ReserveRatio)
+	limit := int64(cc.HardLimitTokens)
+	mode := "hard"
+	if len(cc.Models) > 0 && cc.CacheLimitTokens > 0 {
+		limit = int64(cc.CacheLimitTokens)
+		mode = "cache"
+	}
+	// 滞回：触发线 limit×ratio，裁切线再 ×0.9——裁完离触发线留出增长余量，
+	// 避免每轮都贴线重裁。
+	trigger := int64(float64(limit) * cc.ReserveRatio)
+	budget := trigger * 9 / 10
 	last := int64(0)
 	if session != "" {
 		h.sessInMu.Lock()
@@ -45,7 +78,7 @@ func (h *Handler) compactContext(body []byte, session string) ([]byte, bool) {
 	if last > est {
 		est = last // 会话上一轮真实 in_tokens 是更准的下界
 	}
-	if est <= budget {
+	if est <= trigger {
 		return body, false
 	}
 
@@ -85,6 +118,19 @@ func (h *Handler) compactContext(body []byte, session string) ([]byte, bool) {
 	if cut <= sysEnd || len(rawMsgs)-cut < cc.MinTailMessages {
 		return body, false // 单条消息巨长装不下尾巴：不硬拆消息体
 	}
+	// 切点量化：丢弃段体量向下对齐 compactQuantumTokens 整数倍——切点回退
+	// 少裁一点（留在尾巴里，受滞回余量兜底），换取跨轮稳定。
+	if elided := tokensOfRange(rawMsgs, sysEnd, cut); elided >= compactQuantumTokens {
+		q := elided - elided%compactQuantumTokens
+		var walk int64
+		for i := sysEnd; i < cut; i++ {
+			walk += messageTokens(rawMsgs[i])
+			if walk > q {
+				cut = i
+				break
+			}
+		}
+	}
 	// tool 配对安全：cut 落在 tool 结果上会孤儿化其 assistant tool_call，
 	// 向前扩到配对调用方（连续多条 tool 结果全跨）。
 	for cut > sysEnd {
@@ -97,17 +143,18 @@ func (h *Handler) compactContext(body []byte, session string) ([]byte, bool) {
 	if dropped <= 0 {
 		return body, false
 	}
+	acc = tokensOfRange(rawMsgs, cut, len(rawMsgs))
 	markerTokens := messageTokens(map[string]any{"role": "system", "content": "context notice"})
 	var sysTokens int64
 	for i := 0; i < sysEnd; i++ {
 		sysTokens += messageTokens(rawMsgs[i])
 	}
-	if sysTokens+markerTokens+acc > int64(cc.HardLimitTokens) {
+	if sysTokens+markerTokens+acc > limit {
 		return body, false // system 段自身就吃满预算：裁了也白裁
 	}
 
 	marker := map[string]any{
-		"role": "system",
+		"role":    "system",
 		"content": "[context notice] " + strconv.Itoa(dropped) +
 			" earlier messages were omitted to fit the model context window. Continue with the recent messages below.",
 	}
@@ -120,9 +167,18 @@ func (h *Handler) compactContext(body []byte, session string) ([]byte, bool) {
 	if err != nil {
 		return body, false
 	}
-	log.Printf("context compacted session=%.16s est_tokens=%d budget=%d dropped_msgs=%d kept_msgs=%d bytes %d->%d",
-		session, est, budget, dropped, len(rawMsgs)-cut, len(body), len(nb))
+	log.Printf("context compacted mode=%s model=%s session=%.16s est_tokens=%d trigger=%d budget=%d dropped_msgs=%d kept_msgs=%d bytes %d->%d",
+		mode, model, session, est, trigger, budget, dropped, len(rawMsgs)-cut, len(body), len(nb))
 	return nb, true
+}
+
+// tokensOfRange 求 [from,to) 区间消息的 est token 合计。
+func tokensOfRange(msgs []any, from, to int) int64 {
+	var n int64
+	for i := from; i < to; i++ {
+		n += messageTokens(msgs[i])
+	}
+	return n
 }
 
 // messageRole 取消息 role 字段（非对象/缺 role 返回 ""）。
