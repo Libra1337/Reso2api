@@ -146,12 +146,21 @@ func cacheBody(t *testing.T, model string, msgs []any, sys map[string]any, cache
 	return h.compactContext(raw, "sess-test", model)
 }
 
-// Models 白名单外的模型即使体量超 HardLimit 也不裁（flash-only 生效）。
+// Models 白名单外的模型不按缓存档裁（flash-only 生效），但 1M 硬上限保护保留。
 func TestContextCompactModelGate(t *testing.T) {
 	msgs := mkMsgs(60, 30) // ~707k est
 	sys := map[string]any{"role": "system", "content": "You are helpful."}
 	if _, ok := cacheBody(t, "deepseek-v4.1-flash", msgs, sys, 200000); ok {
-		t.Fatal("白名单外模型不应被裁")
+		t.Fatal("白名单外模型不超硬上限不应被裁")
+	}
+	// 超过 HardLimit(1048576×0.85=891289) 的非白名单模型仍按硬上限裁
+	huge := mkMsgs(90, 30)
+	nb2, ok2 := cacheBody(t, "deepseek-v4.1-flash", huge, sys, 200000)
+	if !ok2 {
+		t.Fatal("白名单外模型超过硬上限仍应被保护性裁剪")
+	}
+	if !strings.Contains(string(nb2), "[context notice]") {
+		t.Fatal("硬上限裁剪应带标记")
 	}
 	nb, ok := cacheBody(t, "glm-5.3-flash", msgs, sys, 200000)
 	if !ok {

@@ -50,17 +50,18 @@ func compactModelMatched(cc config.ContextCompactConfig, model string) bool {
 
 // compactContext 超限时裁剪请求体。返回（新 body, 是否发生裁剪）。
 // 阈值选择：命中 Models 且配了 CacheLimitTokens → 缓存档裁剪（flash 类
-// 超体量前缀上游缓存承不住）；否则 HardLimitTokens 硬上限保护。
+// 超体量前缀上游缓存承不住）；其余模型仍按 HardLimitTokens 硬上限保护
+// （11115 400 规避,models 只圈定缓存档阈值,不关保护）。
 // 不超限或裁不动（无 messages / system 段自身超限 / 尾巴装不下最少条数）
 // → 原样返回，交给错误路径报官方 context_length_exceeded。
 func (h *Handler) compactContext(body []byte, session, model string) ([]byte, bool) {
 	cc := h.cfg.ContextCompact.Normalized()
-	if !cc.Enabled || !compactModelMatched(cc, model) {
+	if !cc.Enabled {
 		return body, false
 	}
 	limit := int64(cc.HardLimitTokens)
 	mode := "hard"
-	if len(cc.Models) > 0 && cc.CacheLimitTokens > 0 {
+	if cc.CacheLimitTokens > 0 && compactModelMatched(cc, model) {
 		limit = int64(cc.CacheLimitTokens)
 		mode = "cache"
 	}
