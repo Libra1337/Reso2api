@@ -1108,6 +1108,18 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 				h.stickyClear(rt, session)
 				rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 			default: // ErrClient / ErrNotFound：请求本身被上游拒绝
+				// 上游 401（token 失效或风控 HTML 挑战页）：该号当前不可用——
+				// 冷却 2h 自动恢复 + 清粘性 + 换号续试，不透传 401 给客户端
+				//（monoize 把 401 当渠道故障熔断，整批用户报 no provider；
+				// 2026-11-02 实测死号粘性下每发都 401 风暴）。
+				if status == http.StatusUnauthorized {
+					h.stickyClear(rt, session)
+					rt.Pool.Cooldown(acct.UID, pool.CoolHard, 2*time.Hour, "upstream 401")
+					log.Printf("upstream 401 cooldown platform=%s uid=%.8s rotate (token invalid or risk-control challenge)", rt.Kind, acct.UID)
+					lastErr = &provider.Error{Kind: kind, Status: status, Msg: string(respBody)}
+					lastStatus, lastBody = status, respBody
+					continue
+				}
 				// 不清粘性：11140 内容审核 / 11133 参数错是请求内容问题，
 				// 账号本身健康，会话下一轮继续用同号可保住上游前缀缓存。
 				// 11140 内容审核熔断：短窗多次说明持续发违规内容，冷却止损防整号拉黑
