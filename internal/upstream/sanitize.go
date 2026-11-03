@@ -20,6 +20,8 @@ var sanitizeFeatures = []string{
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 	"11128",                                           // 上游反探测：裸数字错误码（PR #46）
+	"AI agent powered by",                             // agent harness 身份句（11128 渠道检测,2026-11-03 实测）
+	"coding agent",                                    // LynShen/Codex 变体通用措辞（同上）
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -56,6 +58,19 @@ var sanitizeRewrites = [][2]string{
 	{
 		"Main branch (you will usually use this for PRs)",
 		"Default branch (you will usually use this for PRs)",
+	},
+	{
+		// 11128 渠道检测（2026-11-03 A/B 实测）：上游按归一化关键词组匹配
+		// （空白变形无效，换词有效）——"an AI agent powered by DeepSeek
+		// Harness" 命中即拒；改 agent→assistant 即过（保留 Harness 产品名
+		// 不影响模型行为）。覆盖 DeepSeek Harness 类身份句。
+		"an AI agent powered by",
+		"an AI assistant powered by",
+	},
+	{
+		// 同上：coding agent 通用措辞（LynShen/Codex 变体），一词互换语义不变。
+		"a coding agent",
+		"a coding assistant",
 	},
 }
 

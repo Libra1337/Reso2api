@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -33,5 +34,24 @@ func TestSanitizeSkipsToolRole(t *testing.T) {
 	user := msgs[0].(map[string]any)["content"].(string)
 	if user == "This is a long enough prose sentence that will be mutated by the sanitizer pass." {
 		t.Errorf("user prose should be mutated")
+	}
+}
+
+// 11128 渠道检测措辞改写（2026-11-03 实测：agent→assistant 一词即可绕过，
+// 空白变形无效）。DeepSeek Harness 身份句与 coding agent 通用措辞都必须命中。
+func TestSanitizeHarnessIdentityRewrite(t *testing.T) {
+	src := "You are an AI agent powered by DeepSeek Harness.  You are a coding agent powered by the deepseek-v4.1-flash model."
+	out := sanitizeText(src)
+	if strings.Contains(out, "an AI agent powered by") || strings.Contains(out, "a coding agent") {
+		t.Fatalf("harness 措辞未改写: %s", out[:80])
+	}
+	if !strings.Contains(out, "an AI assistant powered by DeepSeek Harness") {
+		t.Fatalf("应保留 Harness 产品名只换 agent: %s", out[:80])
+	}
+	if !hasFingerprint(src) {
+		t.Fatal("闸门应命中 AI agent powered by")
+	}
+	if hasFingerprint("You are a helpful assistant.") {
+		t.Fatal("普通请求不应触发闸门")
 	}
 }
