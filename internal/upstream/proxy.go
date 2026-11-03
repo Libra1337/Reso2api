@@ -32,6 +32,9 @@ type ProxyEntry struct {
 	Pass     string `json:"pass,omitempty"`
 	Disabled bool   `json:"disabled,omitempty"`
 	Note     string `json:"note,omitempty"`
+	// Scheme 代理协议：http（默认，HTTPS 走 CONNECT）或 socks5。
+	// Go net/http Transport 原生支持 socks5:// 代理 URL。
+	Scheme string `json:"scheme,omitempty"`
 }
 
 // proxyState 代理池状态（热重载）。
@@ -118,6 +121,14 @@ func enabledProxiesLocked() []ProxyEntry {
 	return out
 }
 
+// proxyScheme 补协议默认值（空 = http）。
+func proxyScheme(s string) string {
+	if s == "socks5" || s == "http" || s == "https" {
+		return s
+	}
+	return "http"
+}
+
 // ProxyFor 账号 uid → 固定代理。池空返回 nil（直连）。
 func ProxyFor(uid string) *url.URL {
 	proxyPool.mu.RLock()
@@ -129,7 +140,7 @@ func ProxyFor(uid string) *url.URL {
 	sum := sha256.Sum256([]byte(uid))
 	idx := int(sum[0]) | int(sum[1])<<8 // 65536 取模，池内均匀
 	e := enabled[idx%len(enabled)]
-	u := &url.URL{Scheme: "http", Host: e.Addr}
+	u := &url.URL{Scheme: proxyScheme(e.Scheme), Host: e.Addr}
 	if e.User != "" {
 		u.User = url.UserPassword(e.User, e.Pass)
 	}
@@ -155,7 +166,7 @@ func BasicProxyAuth(user, pass string) string {
 // DialTest 拨号测试：经指定代理访问出口 IP 回显服务，返回 (出口IP, 耗时ms, err)。
 // 面板「测试」按钮用；不进账号分流路径。
 func DialTest(e ProxyEntry) (string, int64, error) {
-	u := &url.URL{Scheme: "http", Host: e.Addr}
+	u := &url.URL{Scheme: proxyScheme(e.Scheme), Host: e.Addr}
 	if e.User != "" {
 		u.User = url.UserPassword(e.User, e.Pass)
 	}

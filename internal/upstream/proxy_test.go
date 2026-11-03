@@ -96,3 +96,17 @@ func TestProxySaveLoadRoundtrip(t *testing.T) {
 		t.Fatalf("roundtrip mismatch: %+v", got)
 	}
 }
+
+// socks5 协议字段生效：socks5 代理走 socks5:// URL（net/http 原生支持），
+// 空字段回落 http（旧 proxies.json 兼容）。
+func TestProxySchemeSelection(t *testing.T) {
+	if s := proxyScheme(""); s != "http" {
+		t.Fatalf("空 scheme 应回落 http, got %s", s)
+	}
+	if s := proxyScheme("socks5"); s != "socks5" {
+		t.Fatalf("socks5 应透传, got %s", s)
+	}
+	if s := proxyScheme("garbage"); s != "http" {
+		t.Fatalf("未知 scheme 应回落 http, got %s", s)
+	}
+}
