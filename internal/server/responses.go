@@ -32,6 +32,15 @@ type respInputItem struct {
 	Output    json.RawMessage `json:"output"`
 }
 
+// respContentPart Responses content part（宽松解析）。input_image.image_url
+// 在 Responses 里是字符串，部分客户端沿用 chat 的 {"url":...} 对象形态，两者都收。
+type respContentPart struct {
+	Type     string          `json:"type"`
+	Text     string          `json:"text"`
+	ImageURL json.RawMessage `json:"image_url"`
+	Detail   string          `json:"detail"`
+}
+
 // respTool Responses 扁平函数定义 {type:function, name, description, parameters}。
 type respTool struct {
 	Type        string `json:"type"`
@@ -95,19 +104,46 @@ func translateResponsesToChat(raw []byte) ([]byte, string, error) {
 					pendingCalls = nil
 				}
 			}
+			// 工具结果/非 user 轮的图片：chat completions 的 tool 消息只能承载
+			// 文本，上游也只认 user 轮的图（见 upstream/images.go）。图片按批
+			// 攒起来，在该批工具结果之后合成一条 user 消息——不得插进
+			// assistant(tool_calls) 与 tool 结果之间，否则工具结果配对断裂。
+			var pendingImages []any
+			flushImages := func() {
+				if len(pendingImages) > 0 {
+					messages = append(messages, map[string]any{
+						"role":    "user",
+						"content": pendingImages,
+					})
+					pendingImages = nil
+				}
+			}
 			for _, it := range items {
 				switch it.Type {
 				case "message":
 					flushCalls()
+					flushImages()
 					role := it.Role
 					if role == "" {
 						role = "user"
 					}
-					messages = append(messages, map[string]any{
-						"role":    role,
-						"content": contentToText(it.Content),
-					})
+					texts, images := responsesContent(it.Content)
+					text := strings.Join(texts, "\n")
+					if role == "user" && len(images) > 0 {
+						parts := make([]any, 0, len(images)+1)
+						if text != "" {
+							parts = append(parts, map[string]any{"type": "text", "text": text})
+						}
+						parts = append(parts, images...)
+						messages = append(messages, map[string]any{"role": role, "content": parts})
+						continue
+					}
+					messages = append(messages, map[string]any{"role": role, "content": text})
+					if len(images) > 0 {
+						messages = append(messages, map[string]any{"role": "user", "content": images})
+					}
 				case "function_call":
+					flushImages()
 					call := map[string]any{
 						"id":   it.CallID,
 						"type": "function",
@@ -119,20 +155,19 @@ func translateResponsesToChat(raw []byte) ([]byte, string, error) {
 					pendingCalls = append(pendingCalls, call)
 				case "function_call_output":
 					flushCalls()
-					out := it.Output
-					if len(out) == 0 {
-						out = json.RawMessage(`""`)
-					}
+					texts, images := responsesContent(it.Output)
 					messages = append(messages, map[string]any{
 						"role":         "tool",
 						"tool_call_id": it.CallID,
-						"content":      contentToText(out),
+						"content":      strings.Join(texts, "\n"),
 					})
+					pendingImages = append(pendingImages, images...)
 				default:
 					// reasoning / item_reference 等忽略
 				}
 			}
 			flushCalls()
+			flushImages()
 		}
 	}
 	if len(messages) == 0 {
@@ -184,8 +219,47 @@ func translateResponsesToChat(raw []byte) ([]byte, string, error) {
 	return out, req.Model, nil
 }
 
-// contentToText 兼容字符串与多模态数组，拼接 text part。
-func contentToText(raw json.RawMessage) string {
+// responsesContent 把 Responses content（字符串 / part 数组）拆成文本与
+// chat image_url part。旧实现只拼 text part，input_image 被静默丢弃——
+// Responses 客户端发图后模型看不到图。
+func responsesContent(raw json.RawMessage) (texts []string, images []any) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return []string{s}, nil
+	}
+	var parts []respContentPart
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return []string{string(raw)}, nil
+	}
+	for _, p := range parts {
+		switch p.Type {
+		case "input_image", "image_url", "output_image":
+			u := imageURLString(p.ImageURL)
+			if u == "" {
+				continue
+			}
+			iu := map[string]any{"url": u}
+			if p.Detail != "" {
+				iu["detail"] = p.Detail
+			}
+			images = append(images, map[string]any{"type": "image_url", "image_url": iu})
+		case "refusal":
+			// chat 侧无对应承载
+		default:
+			if p.Text != "" {
+				texts = append(texts, p.Text)
+			}
+		}
+	}
+	return texts, images
+}
+
+// imageURLString 取 input_image.image_url：Responses 是字符串，
+// chat 形态是 {"url":...} 对象。
+func imageURLString(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
@@ -193,23 +267,13 @@ func contentToText(raw json.RawMessage) string {
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return s
 	}
-	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+	var obj struct {
+		URL string `json:"url"`
 	}
-	if err := json.Unmarshal(raw, &parts); err == nil {
-		var sb strings.Builder
-		for _, p := range parts {
-			if p.Text != "" {
-				if sb.Len() > 0 {
-					sb.WriteByte('\n')
-				}
-				sb.WriteString(p.Text)
-			}
-		}
-		return sb.String()
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		return obj.URL
 	}
-	return string(raw)
+	return ""
 }
 
 // translateToolChoice Responses tool_choice → chat tool_choice。
@@ -300,6 +364,12 @@ func (h *Handler) responsesRelay(w http.ResponseWriter, rc io.ReadCloser, model 
 		}
 	}
 	respEnvelope := func(status string, output []any) map[string]any {
+		// Responses 契约：response.output 必须是数组。nil 切片会被序列化成
+		// null，严格校验方（monoize 等中转）直接 400
+		// responses_invalid_event: response.created.response.output must be an array。
+		if output == nil {
+			output = []any{}
+		}
 		env := map[string]any{
 			"id":     respID,
 			"object": "response",
