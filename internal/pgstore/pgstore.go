@@ -143,11 +143,12 @@ func (s *Store) StartRetention(days int) (stop func()) {
 		tick := time.NewTicker(24 * time.Hour)
 		defer tick.Stop()
 		del := func() {
+			cutoff := time.Now().AddDate(0, 0, -days)
 			for {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 				tag, err := s.pool.Exec(ctx,
 					`DELETE FROM request_logs WHERE ctid IN (
-					   SELECT ctid FROM request_logs WHERE t < now() - ($1 || ' days')::interval LIMIT 20000)`, days)
+					   SELECT ctid FROM request_logs WHERE t < $1 LIMIT 20000)`, cutoff)
 				cancel()
 				if err != nil {
 					log.Printf("[pgstore] retention delete err=%v", err)
