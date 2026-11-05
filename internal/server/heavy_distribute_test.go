@@ -127,12 +127,12 @@ func TestModelEstCalibration(t *testing.T) {
 	if got := h.estFor("", body); got > estTokens(body) {
 		t.Fatalf("未学习时不应放大, got %d", got)
 	}
-	h.noteModelEst(body, 44000) // 真实 44k → 系数≈10 → 限幅 8
+	h.noteModelEst(body, 44000) // 真实 44k / est≈8.2k → 系数≈5.35
 	r := h.modelEstRatio["deepseek-v4-pro"]
-	if r < 7.9 || r > 8 {
-		t.Fatalf("系数应限幅 8, got %f", r)
+	if r < 5.2 || r > 5.6 {
+		t.Fatalf("系数应≈5.35, got %f", r)
 	}
-	if got := h.estFor("", body); got < estTokens(body)*7 {
+	if got := h.estFor("", body); got < estTokens(body)*5 {
 		t.Fatalf("学习后新会话 est 应被抬升, got %d base %d", got, estTokens(body))
 	}
 	// 小探针不学习
