@@ -127,7 +127,7 @@ func TestModelEstCalibration(t *testing.T) {
 	if got := h.estFor("", body); got > estTokens(body) {
 		t.Fatalf("未学习时不应放大, got %d", got)
 	}
-	h.noteModelEst(body, 44000) // 真实 44k / est≈8.2k → 系数≈5.35
+	h.noteModelEst("deepseek-v4-pro", estTokens(body), 44000) // 真实 44k / est≈8.2k → 系数≈5.35
 	r := h.modelEstRatio["deepseek-v4-pro"]
 	if r < 5.2 || r > 5.6 {
 		t.Fatalf("系数应≈5.35, got %f", r)
@@ -137,7 +137,7 @@ func TestModelEstCalibration(t *testing.T) {
 	}
 	// 小探针不学习
 	h2 := &Handler{modelEstRatio: map[string]float64{}}
-	h2.noteModelEst(body, 500)
+	h2.noteModelEst("deepseek-v4-pro", estTokens(body), 500)
 	if len(h2.modelEstRatio) != 0 {
 		t.Fatal("探针请求不应参与校准")
 	}

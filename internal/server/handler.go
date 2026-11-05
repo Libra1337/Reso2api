@@ -327,13 +327,10 @@ func (h *Handler) estFor(session string, body []byte) int64 {
 // noteModelEst 用完成请求的真实 in 校准模型估算系数（EWMA）。
 // 键与 estFor 一致（extractModel(body)）；realIn 太小（探针）不学；
 // 比值限幅 [1,8] 防脏数据。
-func (h *Handler) noteModelEst(body []byte, realIn int64) {
-	model := extractModel(body)
-	log.Printf("model est ENTRY model=%q realIn=%d bytes=%d", model, realIn, len(body)) // TODO(临时诊断)
+func (h *Handler) noteModelEst(model string, base, realIn int64) {
 	if model == "" || realIn < 10_000 {
 		return
 	}
-	base := estTokens(body)
 	if base < 5_000 {
 		return
 	}
@@ -824,6 +821,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.ka.track(session, rt.Kind.String(), uid, body)
 	}
 	bodyFile := h.reqLogs.SaveBodyArchive(body)
+	// 估算校准材料在置空前捕获（body=nil 后完成点拿不到）。
+	estModel, estBase := extractModel(body), estTokens(body)
 	body = nil
 	fbw := newFirstByteWriter(w, t0)
 	if peek.Stream {
@@ -873,7 +872,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.finishReqLogFile(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, true, fbw.ttfb(), tee.snapshot(), bodyFile)
 		if u := tee.snapshot(); u != nil {
 			h.noteSessionIn(session, num(u["prompt_tokens"]))
-			h.noteModelEst(body, num(u["prompt_tokens"]))
+			h.noteModelEst(estModel, estBase, num(u["prompt_tokens"]))
 			if h.ka != nil {
 				h.ka.noteIn(session, num(u["prompt_tokens"]))
 			}
@@ -899,7 +898,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	usage, _ := resp["usage"].(map[string]any)
 	h.finishReqLogFile(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, false, 0, usage, bodyFile)
 	h.noteSessionIn(session, num(usage["prompt_tokens"]))
-	h.noteModelEst(body, num(usage["prompt_tokens"]))
+	h.noteModelEst(estModel, estBase, num(usage["prompt_tokens"]))
 	if h.ka != nil {
 		h.ka.noteIn(session, num(usage["prompt_tokens"]))
 	}
