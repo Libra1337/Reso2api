@@ -240,8 +240,16 @@ func (h *Handler) pickWithStickyForModel(rt *Runtime, model, session string, bod
 		if acct != nil {
 			status, ok := rt.Pool.Status(sticky.uid)
 			if ok && !status.Cooling && !status.Disabled && !rt.Pool.CooledForModel(sticky.uid, model) {
+				h.sessInMu.Lock()
+				lastIn := h.sessLastIn[session]
+				h.sessInMu.Unlock()
 				h.stickyMu.Lock()
 				sticky.lastUsed = time.Now()
+				// estTok 用真实 in 刷新：建粘性时首轮无真实值（字节低估），
+				// 复用时补记，prefixLoadOf 立即准确，新会话避开堆载号。
+				if lastIn > sticky.estTok {
+					sticky.estTok = lastIn
+				}
 				h.stickyMu.Unlock()
 				log.Printf("sticky route platform=%s uid=%s model=%s count=%d/%d",
 					rt.Kind, sticky.uid, model, sticky.reqCount, sticky.maxReqs)
