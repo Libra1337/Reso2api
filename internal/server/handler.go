@@ -344,11 +344,16 @@ func (h *Handler) noteModelEst(body []byte, realIn int64) {
 	}
 	h.modelEstMu.Lock()
 	old, ok := h.modelEstRatio[model]
-	if !ok || old <= 1 {
-		h.modelEstRatio[model] = obs
-	} else {
-		h.modelEstRatio[model] = old*0.8 + obs*0.2
+	nv := obs
+	if ok && old > 1 {
+		nv = old*0.8 + obs*0.2
 	}
+	// 观测：系数变化 >10% 时记一行（排障用，稳态静默）
+	if !ok || (nv > old*1.1 || nv < old*0.9) {
+		log.Printf("model est calib model=%s ratio %.2f->%.2f (obs %.2f realIn %d base %d)",
+			model, old, nv, obs, realIn, base)
+	}
+	h.modelEstRatio[model] = nv
 	h.modelEstMu.Unlock()
 }
 
