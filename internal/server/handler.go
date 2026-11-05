@@ -1120,6 +1120,19 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 					lastStatus, lastBody = status, respBody
 					continue
 				}
+				// 11140 账号受限态（displayMsg: "account has been restricted"）：
+				// 上游对该号一切请求都拦（裸 hi 也 11140），实为封号变体——
+				// 立即禁用 + 清粘性 + 换号续试，不透传（2026-11-05 实测受限号
+				// 造成 400 波,测活全红）。
+				if status == http.StatusForbidden && strings.Contains(string(respBody), "11140") &&
+					strings.Contains(string(respBody), "account has been restricted") {
+					h.stickyClear(rt, session)
+					rt.Pool.Disable(acct.UID, "account restricted (11140)")
+					log.Printf("account restricted disable platform=%s uid=%s rotate", rt.Kind, acct.UID)
+					lastErr = &provider.Error{Kind: kind, Status: status, Msg: string(respBody)}
+					lastStatus, lastBody = status, respBody
+					continue
+				}
 				// 不清粘性：11140 内容审核 / 11133 参数错是请求内容问题，
 				// 账号本身健康，会话下一轮继续用同号可保住上游前缀缓存。
 				// 11140 内容审核熔断：短窗多次说明持续发违规内容，冷却止损防整号拉黑
