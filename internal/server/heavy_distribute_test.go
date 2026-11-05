@@ -99,3 +99,22 @@ func TestRotationAvoidsLoadedAccount(t *testing.T) {
 		t.Fatalf("中等会话应避开已载账号 rich,实际落 %s", uid)
 	}
 }
+
+// estFor 用会话已知真实 in 修正字节低估：deepseek 类 tokenizer 密度远超
+// 2.2B/token（v4-pro real 44k / est 9k），掉出 3 万分布门槛会挤到主力号
+// 被 LRU 踢（2026-11-05 实测 9.9% vs 冷门号 97%）。
+func TestEstForLiftsToKnownRealIn(t *testing.T) {
+	h := &Handler{sessLastIn: map[string]int64{}}
+	small := []byte("{}") // est≈0
+	if got := h.estFor("s1", small); got != 0 {
+		t.Fatalf("无已知值时用字节估算, got %d", got)
+	}
+	h.noteSessionIn("s1", 44000)
+	if got := h.estFor("s1", small); got != 44000 {
+		t.Fatalf("已知真实 in 应抬升估算, got %d want 44000", got)
+	}
+	big := make([]byte, 300000) // est≈136k > 44k
+	if got := h.estFor("s1", big); got != estTokens(big) {
+		t.Fatalf("字节估算更大时取字节值, got %d", got)
+	}
+}

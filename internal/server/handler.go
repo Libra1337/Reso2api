@@ -254,13 +254,13 @@ func (h *Handler) pickWithStickyForModel(rt *Runtime, model, session string, bod
 	// 大前缀(不管分属几个会话/几个模型)会互相 LRU 踢（2026-11-02 实测
 	// 一个多模型 agent 舰队全挤积分最高账号,595k 会话每分钟 100%↔1.3%
 	// 交替）。新粘性建立时,中等以上会话按「账号累计前缀体量最小」落号。
-	est := estTokens(body)
+	est := h.estFor(session, body)
 	var acct *auth.Auth
 	heavy := est >= heavySessionTokens
 	if est >= distributeMinTokens {
 		acct = rt.Pool.PickHeavyDistributing(nil, model, h.prefixLoadOf)
 	} else {
-		acct = h.pickFresh(rt, nil, model, body)
+		acct = h.pickFresh(rt, nil, model, session, body)
 	}
 	if acct == nil {
 		return nil
@@ -281,6 +281,25 @@ const distributeMinTokens = 30_000
 // estTokens 出站 body 字节估算 token（与 compact/keepalive 同系数）。
 func estTokens(body []byte) int64 {
 	return int64(float64(len(body)) / 2.2)
+}
+
+// estFor 会话体量估算 = max(字节估算, 该会话上一轮真实 in_tokens)。
+// 字节系数 2.2B/token 对 deepseek 类高密度 tokenizer 严重低估（实测
+// real 44k 的 v4-pro 会话 est 只有 9k），掉出 3 万分布门槛后全部挤到
+// 高积分主力号、被同号高频舰队 LRU 踢成模板命中（2026-11-05 实测
+// v4-pro 主力号 9.9% vs 冷门号 97%）。已知真实值时以真实值为准。
+func (h *Handler) estFor(session string, body []byte) int64 {
+	est := estTokens(body)
+	if session == "" {
+		return est
+	}
+	h.sessInMu.Lock()
+	last := h.sessLastIn[session]
+	h.sessInMu.Unlock()
+	if last > est {
+		return last
+	}
+	return est
 }
 
 // prefixLoadOf 账号当前绑定的活跃会话前缀体量合计（1h 内,token 估算）。
@@ -839,8 +858,8 @@ func heavyBody(body []byte) bool { return len(body) > 150*1024 }
 // pickFresh 换号选号：中等以上会话按「账号累计前缀体量最小」分散
 //（轮换路径同样会造成大前缀扎堆——2026-11-02 实测舰队经轮换全部落回
 // 积分最高账号）；小会话维持原语义（重任务时优先避开质量降级账号）。
-func (h *Handler) pickFresh(rt *Runtime, tried map[string]bool, model string, body []byte) *auth.Auth {
-	if estTokens(body) >= distributeMinTokens {
+func (h *Handler) pickFresh(rt *Runtime, tried map[string]bool, model, session string, body []byte) *auth.Auth {
+	if h.estFor(session, body) >= distributeMinTokens {
 		return rt.Pool.PickHeavyDistributing(tried, model, h.prefixLoadOf)
 	}
 	if heavyBody(body) {
@@ -1012,7 +1031,7 @@ func (h *Handler) dispatchChat(rt *Runtime, t0 time.Time, model string, body []b
 		}
 		if tried[acct.UID] || rt.Pool.CooledForModel(acct.UID, routeModel) {
 			h.stickyClear(rt, session)
-			acct = h.pickFresh(rt, tried, routeModel, body)
+			acct = h.pickFresh(rt, tried, routeModel, session, body)
 			if acct == nil {
 				break
 			}
