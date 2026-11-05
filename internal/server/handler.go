@@ -62,6 +62,8 @@ type Config struct {
 	// PGStore PostgreSQL 存储模式（storage.mode=postgres）；非 nil 时请求日志
 	// 走 PG（jsonl 停写，历史由 cmd/reqlog-import 一次性导入）
 	PGStore *pgstore.Store
+	// PGRetentionDays 请求日志保留天数（storage.pg_retention_days；0=永久）
+	PGRetentionDays int
 	// MaskUpstream 上游特征掩码（默认开）：models 去渠道前缀 / 错误报文中性化
 	MaskUpstream *bool
 	// Routing 溢流路由（超大上下文改发缓存稳定模型，见 config.Routing）
@@ -102,6 +104,7 @@ type Handler struct {
 	apiMu        sync.RWMutex // 保护 cfg.APIKey（面板可运行时修改）
 	maskUpstream bool
 
+	pgRetentionStop func()
 	// modelEstMu/modelEstRatio 模型 → 字节估算→真实 in 的校准系数（EWMA）。
 	// 字节系数 2.2B/token 对各家族 tokenizer 密度不一（deepseek 实测低估
 	// 5 倍），用每发完成请求的真实 in 在线学习，新会话首 distributed 请求
@@ -156,6 +159,9 @@ func NewHandler(cfg Config) *Handler {
 	h.reqLogs.legacy = cfg.RequestLogLegacyPath
 	if cfg.PGStore != nil {
 		h.reqLogs.pg = cfg.PGStore
+		if cfg.PGRetentionDays > 0 {
+			h.pgRetentionStop = cfg.PGStore.StartRetention(cfg.PGRetentionDays)
+		}
 	}
 	h.reqLogs.load()
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -203,7 +209,12 @@ func (h *Handler) ReadBodyArchive(name string) ([]byte, bool) {
 func (h *Handler) SetBodyArchiveDir(dir string) { h.reqLogs.SetBodiesDir(dir) }
 
 // Close 释放持有的资源（请求日志 journal 句柄）；进程退出时调用。
-func (h *Handler) Close() { h.reqLogs.close() }
+func (h *Handler) Close() {
+	if h.pgRetentionStop != nil {
+		h.pgRetentionStop()
+	}
+	h.reqLogs.close()
+}
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.ServeHTTP(w, r) }
 
@@ -1465,11 +1476,54 @@ func (h *Handler) modelKnown(rt *Runtime, model string) bool {
 
 // extractModel 从请求体提取出站模型名（rewriteModel 之后的裸名）。
 func extractModel(body []byte) string {
+	// 快路径：body 头部字节级扫描 "model" 字段（各客户端均把 model 放在
+	// 顶层靠前；estFor/路由每请求都调,MB 级 body 全量 Unmarshal 纯属浪费）。
+	// 命中串形态合法即用,否则回退结构化解析兜底。
+	head := body
+	if len(head) > 2048 {
+		head = head[:2048]
+	}
+	if i := bytes.Index(head, []byte(`"model"`)); i >= 0 {
+		rest := head[i+len(`"model"`):]
+		j := 0
+		for j < len(rest) && (rest[j] == ' ' || rest[j] == ':') {
+			j++
+		}
+		if j < len(rest) && rest[j] == '"' {
+			j++
+			start := j
+			for j < len(rest) && rest[j] != '"' {
+				if rest[j] == '\\' && j+1 < len(rest) {
+					j++
+				}
+				j++
+			}
+			if j > start && modelLooksValid(rest[start:j]) {
+				return string(rest[start:j])
+			}
+		}
+	}
 	var s struct {
 		Model string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &s)
 	return s.Model
+}
+
+// modelLooksValid 常规模型名形态（防扫到消息内容里的 "model" 文本）。
+func modelLooksValid(b []byte) bool {
+	if len(b) == 0 || len(b) > 64 {
+		return false
+	}
+	for _, c := range b {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.' || c == '-' || c == '_' || c == '/' || c == '@':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // extractConversationID 从请求体提取会话标识（metadata.conversation_id /

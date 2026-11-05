@@ -11,6 +11,7 @@ package pgstore
 
 import (
 	"context"
+	"log"
 	"errors"
 	"fmt"
 	"strings"
@@ -129,6 +130,48 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 }
 
 // Close 关闭连接池。
+
+// StartRetention 留存清理：每天批量删除超过保留天数的请求日志
+//（storage.pg_retention_days > 0 时启用；0 = 永久保留,不启动）。
+// 小批量循环删除避免长事务/锁表；返回停止函数。
+func (s *Store) StartRetention(days int) (stop func()) {
+	if days <= 0 {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		tick := time.NewTicker(24 * time.Hour)
+		defer tick.Stop()
+		del := func() {
+			for {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				tag, err := s.pool.Exec(ctx,
+					`DELETE FROM request_logs WHERE ctid IN (
+					   SELECT ctid FROM request_logs WHERE t < now() - ($1 || ' days')::interval LIMIT 20000)`, days)
+				cancel()
+				if err != nil {
+					log.Printf("[pgstore] retention delete err=%v", err)
+					return
+				}
+				if tag.RowsAffected() == 0 {
+					return
+				}
+				time.Sleep(2 * time.Second) // 让出负载
+			}
+		}
+		del() // 启动即清一轮
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+				del()
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
 func (s *Store) Close() {
 	if s != nil && s.pool != nil {
 		s.pool.Close()

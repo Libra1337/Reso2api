@@ -263,6 +263,7 @@ func main() {
 		WebUI:                sub,
 		AttachAPI:            appInst.HandleAPI,
 		PGStore:              pgDB,
+		PGRetentionDays:      cfg.Storage.PGRetentionDays,
 		MaskUpstream:         cfg.Features.MaskUpstream,
 		Routing:              cfg.Routing,
 		Keepalive:            cfg.Keepalive,

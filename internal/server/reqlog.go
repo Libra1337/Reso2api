@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"wild-work/internal/pgstore"
 )
@@ -292,9 +293,14 @@ func (s *reqLogStore) SaveBodyArchive(body []byte) string {
 	if !logAllBodies && randIntn(10) != 0 { // 10% 采样
 		return ""
 	}
-	if r := []rune(string(body)); len(r) > bodyArchiveCap() { // 单条上限
-		trunc := string([]rune(string(body))[:bodyArchiveCap()]) + "\n…（过长截断）"
-		body = []byte(trunc)
+	// 单条上限：按字节截断（cap*4 字节 ≥ cap 个 rune 的最坏 4 字节形态）,
+	// 对齐 UTF-8 边界。避免为检查长度把整个 MB 级 body 转 rune 切片。
+	if maxB := bodyArchiveCap() * 4; len(body) > maxB {
+		cut := maxB
+		for cut > 0 && !utf8.RuneStart(body[cut]) {
+			cut--
+		}
+		body = append(body[:cut:cut], []byte("\n…（过长截断）")...)
 	}
 	name := fmt.Sprintf("%d-%s.json", time.Now().UnixMilli(), randHex4())
 	fp := filepath.Join(s.bodies, name)
