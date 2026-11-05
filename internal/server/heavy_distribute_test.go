@@ -118,3 +118,27 @@ func TestEstForLiftsToKnownRealIn(t *testing.T) {
 		t.Fatalf("字节估算更大时取字节值, got %d", got)
 	}
 }
+
+// noteModelEst 在线学习字节→真实 in 换算率：deepseek 类低估 5 倍时,
+// 新会话首请求的 estFor 即被系数抬升越过分布门槛。
+func TestModelEstCalibration(t *testing.T) {
+	h := &Handler{sessLastIn: map[string]int64{}, modelEstRatio: map[string]float64{}}
+	body := []byte(`{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"` + strings.Repeat("字", 6000) + `"}]}`) // ~9KB → est≈4.2k
+	if got := h.estFor("", body); got > estTokens(body) {
+		t.Fatalf("未学习时不应放大, got %d", got)
+	}
+	h.noteModelEst(body, 44000) // 真实 44k → 系数≈10 → 限幅 8
+	r := h.modelEstRatio["deepseek-v4-pro"]
+	if r < 7.9 || r > 8 {
+		t.Fatalf("系数应限幅 8, got %f", r)
+	}
+	if got := h.estFor("", body); got < estTokens(body)*7 {
+		t.Fatalf("学习后新会话 est 应被抬升, got %d base %d", got, estTokens(body))
+	}
+	// 小探针不学习
+	h2 := &Handler{modelEstRatio: map[string]float64{}}
+	h2.noteModelEst(body, 500)
+	if len(h2.modelEstRatio) != 0 {
+		t.Fatal("探针请求不应参与校准")
+	}
+}

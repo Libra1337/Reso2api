@@ -102,6 +102,12 @@ type Handler struct {
 	apiMu        sync.RWMutex // 保护 cfg.APIKey（面板可运行时修改）
 	maskUpstream bool
 
+	// modelEstMu/modelEstRatio 模型 → 字节估算→真实 in 的校准系数（EWMA）。
+	// 字节系数 2.2B/token 对各家族 tokenizer 密度不一（deepseek 实测低估
+	// 5 倍），用每发完成请求的真实 in 在线学习，新会话首 distributed 请求
+	// 即可按真实体量参与分布（2026-11-06）。
+	modelEstMu    sync.RWMutex
+	modelEstRatio map[string]float64
 	// sessInMu/sessLastIn 会话 → 上一轮真实 in_tokens（溢流路由判定用；
 	// 首轮无记录时按 body 字节估算）。与 sticky 同规格淘汰。
 	sessInMu   sync.Mutex
@@ -141,7 +147,7 @@ func NewHandler(cfg Config) *Handler {
 		maskUpstream = *cfg.MaskUpstream
 	}
 	maskUpstreamDefault = maskUpstream
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), maskUpstream: maskUpstream, sessLastIn: make(map[string]int64)}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), maskUpstream: maskUpstream, sessLastIn: make(map[string]int64), modelEstRatio: make(map[string]float64)}
 	if cfg.Keepalive.Enabled {
 		h.ka = newKeepaliveStore(cfg.KeepaliveDir, cfg.Keepalive)
 		h.runKeepaliveLoop(h.ka)
@@ -291,13 +297,21 @@ func estTokens(body []byte) int64 {
 	return int64(float64(len(body)) / 2.2)
 }
 
-// estFor 会话体量估算 = max(字节估算, 该会话上一轮真实 in_tokens)。
+// estFor 会话体量估算 = max(字节估算×模型校准系数, 该会话上一轮真实 in)。
 // 字节系数 2.2B/token 对 deepseek 类高密度 tokenizer 严重低估（实测
 // real 44k 的 v4-pro 会话 est 只有 9k），掉出 3 万分布门槛后全部挤到
 // 高积分主力号、被同号高频舰队 LRU 踢成模板命中（2026-11-05 实测
-// v4-pro 主力号 9.9% vs 冷门号 97%）。已知真实值时以真实值为准。
+// v4-pro 主力号 9.9% vs 冷门号 97%）。校准系数由 noteModelEst 从每发
+// 完成请求在线学习，覆盖新会话首请求（无历史）的场景。
 func (h *Handler) estFor(session string, body []byte) int64 {
+	m := extractModel(body)
 	est := estTokens(body)
+	h.modelEstMu.RLock()
+	r := h.modelEstRatio[m]
+	h.modelEstMu.RUnlock()
+	if r > 1 {
+		est = int64(float64(est) * r)
+	}
 	if session == "" {
 		return est
 	}
@@ -308,6 +322,34 @@ func (h *Handler) estFor(session string, body []byte) int64 {
 		return last
 	}
 	return est
+}
+
+// noteModelEst 用完成请求的真实 in 校准模型估算系数（EWMA）。
+// 键与 estFor 一致（extractModel(body)）；realIn 太小（探针）不学；
+// 比值限幅 [1,8] 防脏数据。
+func (h *Handler) noteModelEst(body []byte, realIn int64) {
+	model := extractModel(body)
+	if model == "" || realIn < 10_000 {
+		return
+	}
+	base := estTokens(body)
+	if base < 5_000 {
+		return
+	}
+	obs := float64(realIn) / float64(base)
+	if obs < 1 {
+		obs = 1
+	} else if obs > 8 {
+		obs = 8
+	}
+	h.modelEstMu.Lock()
+	old, ok := h.modelEstRatio[model]
+	if !ok || old <= 1 {
+		h.modelEstRatio[model] = obs
+	} else {
+		h.modelEstRatio[model] = old*0.8 + obs*0.2
+	}
+	h.modelEstMu.Unlock()
 }
 
 // prefixLoadOf 账号当前绑定的活跃会话前缀体量合计（1h 内,token 估算）。
@@ -825,6 +867,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.finishReqLogFile(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, true, fbw.ttfb(), tee.snapshot(), bodyFile)
 		if u := tee.snapshot(); u != nil {
 			h.noteSessionIn(session, num(u["prompt_tokens"]))
+			h.noteModelEst(body, num(u["prompt_tokens"]))
 			if h.ka != nil {
 				h.ka.noteIn(session, num(u["prompt_tokens"]))
 			}
@@ -850,6 +893,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	usage, _ := resp["usage"].(map[string]any)
 	h.finishReqLogFile(t0, requestedModel, rt.Kind.String(), uid, http.StatusOK, false, 0, usage, bodyFile)
 	h.noteSessionIn(session, num(usage["prompt_tokens"]))
+	h.noteModelEst(body, num(usage["prompt_tokens"]))
 	if h.ka != nil {
 		h.ka.noteIn(session, num(usage["prompt_tokens"]))
 	}
