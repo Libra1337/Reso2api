@@ -329,6 +329,7 @@ func (h *Handler) estFor(session string, body []byte) int64 {
 // 比值限幅 [1,8] 防脏数据。
 func (h *Handler) noteModelEst(body []byte, realIn int64) {
 	model := extractModel(body)
+	log.Printf("model est ENTRY model=%q realIn=%d bytes=%d", model, realIn, len(body)) // TODO(临时诊断)
 	if model == "" || realIn < 10_000 {
 		return
 	}
